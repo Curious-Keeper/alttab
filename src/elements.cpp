@@ -23,17 +23,16 @@ void WindowSnapshot::update() {
     return;
   }
 
-  auto rounded = size;
-  rounded.round();
-  if (rounded.x >= 1.0 && rounded.y >= 1.0) {
-    if (rounded != fb.m_size) {
-      fb.alloc(rounded.x, rounded.y, MONITOR->m_output->state->state().drmFormat);
+  auto tsize = ((WindowContainer *)parent)->targetSize.round();
+  if (tsize.x > 0 && tsize.y > 0) {
+    if (tsize > fb.m_size) {
+      fb.alloc(tsize.x, tsize.y, MONITOR->m_output->state->state().drmFormat);
     }
   }
 
   g_pHyprRenderer->makeEGLCurrent();
 
-  CRegion fbBox = CBox{{0, 0}, rounded};
+  CRegion fbBox = CBox{{0, 0}, tsize};
   if (!g_pHyprRenderer->beginRender(MONITOR, fbBox, RENDER_MODE_FULL_FAKE, nullptr, &fb)) {
     Log::logger->log(Log::ERR, "[{}] WindowSnapshot::update, beginRender failed", PLUGIN_NAME);
     return;
@@ -41,7 +40,8 @@ void WindowSnapshot::update() {
 
   g_pHyprOpenGL->clear(CHyprColor{0, 0, 0, 1.0f});
 
-  double scale = std::min(size.x / surfaceSize.x, size.y / surfaceSize.y);
+  double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
+
   auto root = window->wlSurface()->resource();
 
   root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
