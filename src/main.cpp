@@ -1,7 +1,10 @@
 #include "../include/renderpasses.hpp"
 #include <algorithm>
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprlang.hpp>
 #include <linux/input-event-codes.h>
+#include <src/Compositor.hpp>
+#include <src/config/ConfigDataValues.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/devices/IKeyboard.hpp>
 #include <src/managers/input/InputManager.hpp>
@@ -68,6 +71,14 @@ public:
     deactivate();
   }
 
+  void rebuildAll() {
+    windows.clear();
+    for (auto &el : g_pCompositor->m_windows) {
+      if (el->m_isMapped)
+        windows.emplace_back(makeUnique<WindowContainer>(el));
+    }
+  }
+
   void refreshLayout() {
     Log::logger->log(Log::TRACE, "[{}] refreshLayout entry, active: {}, windows.size(): {}", PLUGIN_NAME, active, windows.size());
     if (!MONITOR || windows.empty())
@@ -98,7 +109,6 @@ public:
 
     auto activeWin = activeList[activeIndex];
     activeWin->targetPos = screenCenter - (activeWin->targetSize / 2.0);
-    Log::logger->log(Log::TRACE, "[{}] refreshLayout, activeIndex: {}, activeWin: {}, targetPos: {}, targetSize: {}", PLUGIN_NAME, activeIndex, activeWin->window->m_title, activeWin->targetPos, activeWin->targetSize);
 
     for (int i = activeIndex - 1; i >= 0; --i) {
       activeList[i]->targetPos.x = activeList[i + 1]->targetPos.x - activeList[i]->targetSize.x - spacing;
@@ -112,7 +122,6 @@ public:
   }
 
   void onPreRender() {
-    Log::logger->log(Log::ERR, "[{}] onPreRender entry, active: {}, windows.size(): {}", PLUGIN_NAME, active, windows.size());
     if (!active || windows.empty() || !MONITOR)
       return;
 
@@ -153,7 +162,6 @@ public:
 
     if (animating)
       g_pHyprRenderer->damageMonitor(MONITOR);
-    Log::logger->log(Log::ERR, "[{}] onPreRender exit", PLUGIN_NAME);
   }
 
   std::vector<Element *> getRenderList() {
@@ -175,7 +183,6 @@ inline static UP<CarouselManager> g_pCarouselManager = makeUnique<CarouselManage
 static void onPreRender() {
   if (g_pCarouselManager->active) {
     g_pCarouselManager->onPreRender();
-    Log::logger->log(Log::ERR, "onPreRender complete");
   }
 }
 
@@ -271,6 +278,82 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
   return false;
 }
 
+// Straight from ConfigManager.cpp. THANKS GUYS!
+static Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
+  std::string V = VALUE;
+
+  if (!*data)
+    *data = new CGradientValueData();
+
+  const auto DATA = sc<CGradientValueData *>(*data);
+
+  CVarList2 varlist(std::string(V), 0, ' ');
+  DATA->m_colors.clear();
+
+  std::string parseError = "";
+
+  for (auto const &var : varlist) {
+    if (var.find("deg") != std::string::npos) {
+      try {
+        DATA->m_angle = std::stoi(std::string(var.substr(0, var.find("deg")))) * (PI / 180.0); // radians
+      } catch (...) {
+        Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
+        parseError = "Error parsing gradient " + V;
+      }
+
+      break;
+    }
+
+    if (DATA->m_colors.size() >= 10) {
+      Log::logger->log(Log::WARN, "Error parsing gradient {}: max colors is 10.", V);
+      parseError = "Error parsing gradient " + V + ": max colors is 10.";
+      break;
+    }
+
+    try {
+      const auto COL = configStringToInt(std::string(var));
+      if (!COL)
+        throw std::runtime_error(std::format("failed to parse {} as a color", var));
+      DATA->m_colors.emplace_back(COL.value());
+    } catch (std::exception &e) {
+      Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
+      parseError = "Error parsing gradient " + V + ": " + e.what();
+    }
+  }
+
+  if (DATA->m_colors.empty()) {
+    Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
+    if (parseError.empty())
+      parseError = "Error parsing gradient " + V + ": No colors?";
+
+    DATA->m_colors.emplace_back(0); // transparent
+  }
+
+  DATA->updateColorsOk();
+
+  Hyprlang::CParseResult result;
+  if (!parseError.empty())
+    result.setError(parseError.c_str());
+
+  return result;
+}
+
+static void configHandleGradientDestroy(void **data) {
+  if (*data)
+    delete sc<CGradientValueData *>(*data);
+}
+
+static void onConfigReload() {
+  Log::logger->log(Log::TRACE, "[{}] onConfigReload", PLUGIN_NAME);
+  FONTSIZE = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:font_size")->getValue());
+  BORDERSIZE = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_size")->getValue());
+  BORDERROUNDING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_rounding")->getValue());
+  BORDERROUNDINGPOWER = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_rounding_power")->getValue());
+  ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
+  INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
+  g_pCarouselManager->rebuildAll();
+}
+
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   PHANDLE = handle;
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
@@ -282,16 +365,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   static auto POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
   static auto PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
   static auto PMONITORFOCUS = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocus(std::any_cast<PHLMONITOR>(p)); });
+  static auto PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding", Hyprlang::INT{0});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding_power", Hyprlang::FLOAT{2});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
 
   HyprlandAPI::reloadConfig();
-
-  static auto fs = CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
-  static auto bs = CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
-  FONTSIZE = &fs;
-  BORDERSIZE = &bs;
+  onConfigReload();
 
   MONITOR = Desktop::focusState()->monitor();
 

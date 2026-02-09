@@ -49,7 +49,7 @@ public:
   }
 
   void draw(const Vector2D &offset) override {
-    Log::logger->log(Log::ERR, "Container::draw");
+    Log::logger->log(Log::TRACE, "Container::draw");
     Vector2D position = pos + offset;
     for (auto &el : elements)
       el->draw(position);
@@ -91,10 +91,10 @@ public:
 
 class BorderBox : public Element {
 public:
-  BorderBox(PHLWINDOW w) : window(w) {};
+  BorderBox(PHLWINDOW w, int bs = 1, int r = 0, float power = 2) : window(w), bordersize(bs), rounding(r), power(power) {};
   PHLWINDOW window;
-  CHyprColor activeColor = {1.0f, 0.5f, 0.0f, 1.0f};
-  CHyprColor inactiveColor = {0.3f, 0.3f, 0.3f, 0.8f};
+  int bordersize, rounding;
+  float power;
   bool isActive = false;
 
   void update() override { ; };

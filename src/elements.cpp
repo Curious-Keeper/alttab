@@ -77,7 +77,7 @@ void TextBox::update() {
   if (window->m_title != lasttitle) {
     lasttitle = window->m_title;
     // 0.6 might be correct?
-    auto div = std::max(1.0, (**FONTSIZE * 0.6));
+    auto div = std::max(1.0, (FONTSIZE * 0.6));
     text = middleTruncate(window->m_title, (size.x / div));
   }
 }
@@ -97,7 +97,7 @@ void TextBox::draw(const Vector2D &offset) {
   }
   g_pHyprOpenGL->renderRect({offset, size}, CHyprColor{0, 0, 0, 0.2f}, {});
   if (!texture) {
-    texture = g_pHyprOpenGL->renderText(text, color, **FONTSIZE);
+    texture = g_pHyprOpenGL->renderText(text, color, FONTSIZE);
   }
   if (!texture) {
     Log::logger->log(Log::ERR, "[{}] TextBox::draw, no texture", PLUGIN_NAME);
@@ -134,9 +134,9 @@ void WindowContainer::draw(const Vector2D &offset) {
 
 WindowContainer::WindowContainer(PHLWINDOW window) : window(window) {
   Log::logger->log(Log::TRACE, "[{}] WindowContainer::WindowContainer", PLUGIN_NAME);
-  header = add<TextBox>(window, TITLECOLOR, **FONTSIZE);
+  header = add<TextBox>(window, TITLECOLOR, FONTSIZE);
   snapshot = add<WindowSnapshot>(window);
-  border = add<BorderBox>(window);
+  border = add<BorderBox>(window, BORDERSIZE, BORDERROUNDING, BORDERROUNDINGPOWER);
   onResize();
 };
 void BorderBox::draw(const Vector2D &offset) {
@@ -146,5 +146,5 @@ void BorderBox::draw(const Vector2D &offset) {
     return;
   }
   auto box = CBox{offset, size}.round();
-  g_pHyprOpenGL->renderBorder(box, isActive ? activeColor : inactiveColor, {.round = 3, .borderSize = 2});
+  g_pHyprOpenGL->renderBorder(box, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = rounding, .roundingPower = power, .borderSize = bordersize});
 }

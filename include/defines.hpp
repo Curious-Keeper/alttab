@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hyprlang.hpp>
+#include <src/config/ConfigDataValues.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/desktop/DesktopTypes.hpp>
 #include <src/helpers/Color.hpp>
@@ -8,8 +9,12 @@
 inline PHLMONITOR MONITOR = nullptr;
 inline HANDLE PHANDLE = nullptr;
 
-inline CConfigValue<Hyprlang::INT> *FONTSIZE;
-inline CConfigValue<Hyprlang::INT> *BORDERSIZE;
+inline long FONTSIZE;
+inline long BORDERSIZE;
+inline long BORDERROUNDING;
+inline float BORDERROUNDINGPOWER;
+inline CGradientValueData *ACTIVEBORDERCOLOR;
+inline CGradientValueData *INACTIVEBORDERCOLOR;
 inline auto BLURENABLED = CConfigValue<Hyprlang::INT>("decoration:blur:enabled");
 inline bool DIMENABLED = true;
 inline float DIMAMOUNT = 0.15f;
