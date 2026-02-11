@@ -71,10 +71,16 @@ public:
     deactivate();
   }
 
+  static bool shouldIncludeWindow(PHLWINDOW w) {
+    if (INCLUDE_SPECIAL)
+      return true;
+    return w->m_workspace && !w->m_workspace->m_isSpecialWorkspace;
+  }
+
   void rebuildAll() {
     windows.clear();
     for (auto &el : g_pCompositor->m_windows) {
-      if (el->m_isMapped)
+      if (el->m_isMapped && shouldIncludeWindow(el))
         windows.emplace_back(makeUnique<WindowContainer>(el));
     }
   }
@@ -194,6 +200,8 @@ static void onRender(eRenderStage stage) {
 }
 
 static void onWindowCreated(PHLWINDOW w) {
+  if (!CarouselManager::shouldIncludeWindow(w))
+    return;
   g_pCarouselManager->windows.emplace_back(makeUnique<WindowContainer>(w));
   g_pCarouselManager->refreshLayout();
 }
@@ -349,6 +357,7 @@ static void onConfigReload() {
   ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
   INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
   SPACING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:spacing")->getValue());
+  INCLUDE_SPECIAL = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:include_special")->getValue()) != 0;
   g_pCarouselManager->rebuildAll();
 }
 
@@ -372,6 +381,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:spacing", Hyprlang::INT{10});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:include_special", Hyprlang::INT{1});
 
   HyprlandAPI::reloadConfig();
   onConfigReload();
