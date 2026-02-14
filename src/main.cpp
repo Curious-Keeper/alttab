@@ -383,22 +383,26 @@ static void onWindowClosed(PHLWINDOW w) {
   g_pCarouselManager->refreshLayout();
 }
 
-static void onWindowMoved(PHLWINDOW w) {
-  if (!w->m_monitor)
+static void onWindowMoved(std::any p) {
+  if (!g_pCarouselManager->active)
     return;
 
-  int id = w->m_monitor->m_id;
-  auto &mon = g_pCarouselManager->monitors[id];
+  try {
+    auto args = std::any_cast<std::vector<std::any>>(p);
+    if (args.empty())
+      return;
 
-  for (auto &el : mon.windows) {
-    if (el->window == w) {
-      el->markForRemoval();
-      break;
-    }
+    auto w = std::any_cast<PHLWINDOW>(args[0]);
+    if (!w)
+      return;
+
+    Log::logger->log(Log::TRACE, "[{}] onWindowMoved for window: {}", PLUGIN_NAME, w->m_title);
+
+    g_pCarouselManager->rebuildAll();
+    g_pCarouselManager->refreshLayout();
+  } catch (const std::bad_any_cast &e) {
+    Log::logger->log(Log::ERR, "[{}] onWindowMoved: Cast failed: {}", PLUGIN_NAME, e.what());
   }
-
-  mon.windows.emplace_back(makeUnique<WindowContainer>(w));
-  g_pCarouselManager->refreshLayout();
 }
 
 static void onMonitorAdded() {
@@ -569,7 +573,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   static auto PMONITORADD = HyprlandAPI::registerCallbackDynamic(handle, "monitorAdded", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorAdded(); });
   static auto POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
   static auto PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
-  static auto PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(std::any_cast<PHLWINDOW>(p)); });
+  static auto PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(p); });
   static auto PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
   static auto PONMONITORFOCUSCHANGE = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocusChange(std::any_cast<PHLMONITOR>(p)); });
 
