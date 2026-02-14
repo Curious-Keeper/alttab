@@ -28,6 +28,10 @@ public:
   std::chrono::time_point<std::chrono::steady_clock> lastframe = std::chrono::steady_clock::now();
   size_t activeMonitorIndex = 0;
 
+  CarouselManager() {
+    Log::logger->log(Log::TRACE, "[{}] CarouselManager ctor", PLUGIN_NAME);
+  }
+
   void toggle() {
     active = !active;
     if (!active)
@@ -130,7 +134,7 @@ public:
       // Fuck the stupid follow mouse behaviour. We force it.
       g_pInputManager->unconstrainMouse();
       window->m_relativeCursorCoordsOnLastWarp = g_pInputManager->getMouseCoordsInternal() - window->m_position;
-      Desktop::focusState()->fullWindowFocus(window);
+      Desktop::focusState()->fullWindowFocus(window, Desktop::eFocusReason::FOCUS_REASON_DESKTOP_STATE_CHANGE);
       if (window->m_monitor != MONITOR) {
         window->warpCursor();
         g_pInputManager->m_forcedFocus = window;
@@ -149,6 +153,7 @@ public:
   }
 
   void rebuildAll() {
+    Log::logger->log(Log::TRACE, "[{}] rebuildAll", PLUGIN_NAME);
     monitors.clear();
 
     for (auto &el : g_pCompositor->m_windows) {
@@ -302,7 +307,7 @@ public:
     });
 
     int processed = 0;
-    const int FRAME_BUDGET = 3;
+    const int FRAME_BUDGET = 2;
     for (auto *w : needsUpdate) {
       if (processed >= FRAME_BUDGET)
         break;
@@ -338,7 +343,7 @@ public:
   }
 };
 
-inline static UP<CarouselManager> g_pCarouselManager = makeUnique<CarouselManager>();
+inline static UP<CarouselManager> g_pCarouselManager;
 
 static void onRender(eRenderStage stage) {
   if (!g_pCarouselManager->active)
@@ -399,7 +404,6 @@ static void onWindowMoved(std::any p) {
     Log::logger->log(Log::TRACE, "[{}] onWindowMoved for window: {}", PLUGIN_NAME, w->m_title);
 
     g_pCarouselManager->rebuildAll();
-    g_pCarouselManager->refreshLayout();
   } catch (const std::bad_any_cast &e) {
     Log::logger->log(Log::ERR, "[{}] onWindowMoved: Cast failed: {}", PLUGIN_NAME, e.what());
   }
@@ -600,8 +604,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_active", Hyprlang::FLOAT{0.4});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive", Hyprlang::FLOAT{0.3});
 
+  g_pCarouselManager = makeUnique<CarouselManager>();
+
   HyprlandAPI::reloadConfig();
-  onConfigReload();
 
   MONITOR = Desktop::focusState()->monitor();
 
@@ -622,5 +627,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+  keyhookfn->unhook();
   g_pCarouselManager.reset();
+  MONITOR = nullptr;
+  PHANDLE = nullptr;
 }

@@ -20,7 +20,7 @@ void WindowSnapshot::snapshot() {
   if (targetSize.x <= 1 || targetSize.y <= 1)
     return;
 
-  Vector2D surfaceSize = window->wlSurface()->getViewporterCorrectedSize();
+  auto surfaceSize = window->wlSurface()->getSurfaceBoxGlobal().value_or({0, 0, 0, 0}).size();
   if (surfaceSize.x < 1.0 || surfaceSize.y < 1.0) {
     Log::logger->log(Log::ERR, "[{}] WindowSnapshot::update, invalid surface size: {}", PLUGIN_NAME, surfaceSize);
     return;
