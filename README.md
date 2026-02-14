@@ -4,7 +4,6 @@ Alt-tab style window carousel for Hyprland. Shows live previews of windows; cycl
 
 ![alttab](https://github.com/user-attachments/assets/5a3fc189-ea30-4719-a939-e2d485ea04eb)
 
-
 ## Requirements
 
 - Hyprland (plugin API)
@@ -47,49 +46,54 @@ The plugin hooks Alt+Tab.
 
 In `hyprland.conf`, under `plugin { alttab { ... } }`:
 
-| Option                  | Type     | Default       | Description                                                      |
-| ----------------------- | -------- | ------------- | ---------------------------------------------------------------- |
-| `font_size`             | int      | 24            | Font size for window titles                                      |
-| `border_size`           | int      | 1             | Border width                                                     |
-| `border_rounding`       | int      | 0             | Corner rounding                                                  |
-| `border_rounding_power` | float    | 2             | Rounding curve                                                   |
-| `border_active`         | gradient | (see default) | Active window border gradient                                    |
-| `border_inactive`       | gradient | (see default) | Inactive window border gradient                                  |
-| `spacing`               | int      | 10            | Space between thumbnails                                         |
-| `animation_speed`       | float    | 1.0           | Animation speed                                                  |
-| `unfocused_alpha`       | float    | 0.6           | Alpha for non-focused previews                                   |
-| `include_special`       | int      | 1             | 1 = show windows on special workspace in carousel; 0 = hide them |
-
-Reload config after changes: `hyprctl reload`.
+| Option                  | Type     | Default      | Description                                           |
+| :---------------------- | :------- | :----------- | :---------------------------------------------------- |
+| `font_size`             | int      | `24`         | Font size for window titles                           |
+| `border_size`           | int      | `1`          | Border width                                          |
+| `border_rounding`       | int      | `0`          | Corner rounding                                       |
+| `border_rounding_power` | float    | `2.0`        | Rounding curve power                                  |
+| `border_active`         | gradient | `0xff00ccdd` | Active window border gradient                         |
+| `border_inactive`       | gradient | `0xaabbccdd` | Inactive window border gradient                       |
+| `window_spacing`        | int      | `10`         | Horizontal space between thumbnails                   |
+| `window_size_inactive`  | float    | `0.8`        | Scale of non-active windows relative to row height    |
+| `monitor_size_active`   | float    | `0.4`        | Height of active monitor row (% of screen)            |
+| `monitor_size_inactive` | float    | `0.3`        | Height of other monitor rows (% of screen)            |
+| `monitor_spacing`       | int      | `10`         | Vertical space between monitor rows                   |
+| `animation_speed`       | float    | `1.0`        | Animation speed (in seconds)                          |
+| `unfocused_alpha`       | float    | `0.6`        | Alpha for non-focused previews                        |
+| `include_special`       | int      | `1`          | `1` = show special workspace windows; `0` = hide them |
 
 **Note:** _Hyprland.conf reloads on save by default._
 
-### Example:
+### Example
 
 ```config
 plugin {
-   alttab {
+    alttab {
+        # Header settings
         font_size = 32
+
+        # Border settings
         border_size = 2
-        border_rounding = 5
-        border_rounding_power = 2
         border_active = rgba(33ccffee) rgba(00ff99ee) 45deg
-        border_inactive = rgba(595959aa)
-        include_special = 0
-        #spacing = 10
-        #animation_speed = 1.0
-        #unfocused_alpha = 0.6
-   }
- }
+        border_rounder = 0
+        border_rounding_power = 2
 
-plugin = /path/to/plugin_alttab/build/alttab.so
+        # Monitor row settings
+        monitor_size_active = 0.4
+        monitor_size_inactive = 0.3
+        monitor_spacing = 20
 
+        # Window settings
+        window_size_inactive = 0.8
+        window_spacing = 10
+        unfocused_alpha = 0.6
+
+        # Animation settings
+        animation_speed = 1.0
+
+        # Workspace settings
+        include_special = 1
+    }
+}
 ```
-
-## License
-
-**This is not mine, give credit to creator** check their license. 
-
-## Attribution
-
-[ItsOhen](https://github.com/ItsOhen) made it, give him the star
