@@ -169,62 +169,53 @@ public:
 
     const auto msize = (MONITOR->m_size * MONITOR->m_scale).round();
     const auto center = msize / 2.0;
-    const auto spacing = BORDERSIZE + SPACING_WINDOW;
+    const auto spacing = BORDERSIZE + WINDOW_SPACING;
 
-    const double activeRowH = msize.y * 0.4;
-    const double inactiveRowH = msize.y * MONITOR_SIZE;
-    const double rowGap = SPACING_MONITOR;
+    const double activeRowH = msize.y * MONITOR_SIZE_ACTIVE;
+    const double inactiveRowH = msize.y * MONITOR_SIZE_INACTIVE;
 
-    size_t currentRow = 0;
+    const double verticalStep = ((activeRowH + (inactiveRowH * WINDOW_SIZE_INACTIVE)) / 2.0) + MONITOR_SPACING;
+
+    int currentRow = 0;
     for (auto &[id, monData] : monitors) {
-      auto &rowWindows = monData.windows;
-      auto activeList = rowWindows | std::views::transform([](auto &w) { return w.get(); }) | std::views::filter([](auto *w) { return !w->shouldBeRemoved(); }) | std::ranges::to<std::vector<WindowContainer *>>();
+      auto activeList = monData.windows | std::views::transform([](auto &w) { return w.get(); }) | std::views::filter([](auto *w) { return !w->shouldBeRemoved(); }) | std::ranges::to<std::vector<WindowContainer *>>();
 
       if (activeList.empty()) {
         currentRow++;
         continue;
       }
 
-      bool isRowSelected = (currentRow == activeMonitorIndex);
-      double currentRowHeight = isRowSelected ? activeRowH : inactiveRowH;
-
-      double verticalStep = (activeRowH / 2.0) + (inactiveRowH / 2.0) + rowGap;
-      double rowCenterY = center.y + (((int)currentRow - (int)activeMonitorIndex) * verticalStep);
+      bool isRowSelected = (currentRow == (int)activeMonitorIndex);
+      double rowBaseH = isRowSelected ? activeRowH : inactiveRowH;
+      double rowCenterY = center.y + (currentRow - (int)activeMonitorIndex) * verticalStep;
 
       for (size_t j = 0; j < activeList.size(); ++j) {
-        auto winSize = activeList[j]->window->m_realSize->goal();
-        double rawAspect = winSize.x / std::max(winSize.y, 1.0);
-        double aspect = std::clamp(rawAspect, 0.1, 5.0);
-        // Not decided on if i want this or not.
-        double h = (j == monData.activeIndex && isRowSelected) ? currentRowHeight : (currentRowHeight * 0.8);
-        // double h = (j == monData.activeIndex) ? currentRowHeight : (currentRowHeight * 0.8);
+        auto goal = activeList[j]->window->m_realSize->goal();
+        double aspect = std::clamp(goal.x / std::max(goal.y, 1.0), 0.1, 5.0);
 
+        double h = (j == monData.activeIndex && isRowSelected) ? rowBaseH : (rowBaseH * WINDOW_SIZE_INACTIVE);
         activeList[j]->animSize.set(Vector2D(h * aspect, h), snap);
       }
 
-      auto activeWin = activeList[monData.activeIndex >= activeList.size() ? 0 : monData.activeIndex];
-
-      double winX = center.x - (activeWin->animSize.target.x / 2.0);
-      double winY = rowCenterY - (activeWin->animSize.target.y / 2.0);
-      activeWin->animPos.set(Vector2D(winX, winY), snap);
+      auto activeWin = activeList[std::min(monData.activeIndex, activeList.size() - 1)];
+      activeWin->animPos.set(Vector2D(center.x - (activeWin->animSize.target.x / 2.0), rowCenterY - (activeWin->animSize.target.y / 2.0)), snap);
 
       auto leftX = activeWin->animPos.target.x;
       for (auto *w : activeList | std::views::take(monData.activeIndex) | std::views::reverse) {
-        Vector2D p = {leftX - w->animSize.target.x - spacing, rowCenterY - (w->animSize.target.y / 2.0)};
-        w->animPos.set(p, snap);
-        leftX = p.x;
+        leftX -= (w->animSize.target.x + spacing);
+        w->animPos.set(Vector2D(leftX, rowCenterY - (w->animSize.target.y / 2.0)), snap);
       }
 
       auto rightX = activeWin->animPos.target.x + activeWin->animSize.target.x;
       for (auto *w : activeList | std::views::drop(monData.activeIndex + 1)) {
-        Vector2D p = {rightX + spacing, rowCenterY - (w->animSize.target.y / 2.0)};
-        w->animPos.set(p, snap);
-        rightX = p.x + w->animSize.target.x;
+        w->animPos.set(Vector2D(rightX + spacing, rowCenterY - (w->animSize.target.y / 2.0)), snap);
+        rightX += (w->animSize.target.x + spacing);
       }
 
       for (auto *w : activeList) {
-        w->alpha.set((w == activeWin && isRowSelected) ? 1.0f : UNFOCUSEDALPHA, snap);
-        w->border->isActive = (w == activeWin && isRowSelected);
+        bool isFocused = (w == activeWin && isRowSelected);
+        w->alpha.set(isFocused ? 1.0f : UNFOCUSEDALPHA, snap);
+        w->border->isActive = isFocused;
       }
 
       currentRow++;
@@ -558,9 +549,11 @@ static void onConfigReload() {
   BORDERROUNDINGPOWER = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_rounding_power")->getValue());
   ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
   INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
-  SPACING_WINDOW = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:spacing_window")->getValue());
-  SPACING_MONITOR = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:spacing_monitor")->getValue());
-  MONITOR_SIZE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_size")->getValue());
+  WINDOW_SPACING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:window_spacing")->getValue());
+  WINDOW_SIZE_INACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:window_size_inactive")->getValue());
+  MONITOR_SPACING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_spacing")->getValue());
+  MONITOR_SIZE_ACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_size_active")->getValue());
+  MONITOR_SIZE_INACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive")->getValue());
   ANIMATIONSPEED = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:animation_speed")->getValue());
   UNFOCUSEDALPHA = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha")->getValue());
   INCLUDE_SPECIAL = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:include_special")->getValue()) != 0;
@@ -586,12 +579,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding_power", Hyprlang::FLOAT{2});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:spacing_window", Hyprlang::INT{10});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:spacing_monitor", Hyprlang::INT{10});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_spacing", Hyprlang::INT{10});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_inactive", Hyprlang::FLOAT{0.8});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size", Hyprlang::FLOAT{0.3});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:animation_speed", Hyprlang::FLOAT{1.0});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{0.6});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:include_special", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::INT{10});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_active", Hyprlang::FLOAT{0.4});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive", Hyprlang::FLOAT{0.3});
 
   HyprlandAPI::reloadConfig();
   onConfigReload();
