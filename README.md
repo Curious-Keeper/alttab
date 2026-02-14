@@ -74,7 +74,7 @@ plugin {
         # Border settings
         border_size = 2
         border_active = rgba(33ccffee) rgba(00ff99ee) 45deg
-        border_rounder = 0
+        border_rounding = 0
         border_rounding_power = 2
 
         # Monitor row settings
