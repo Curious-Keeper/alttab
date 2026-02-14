@@ -69,6 +69,7 @@ public:
     }
 
     refreshLayout(true);
+    g_pCompositor->scheduleFrameForMonitor(MONITOR);
   }
 
   void damageMonitors() {
@@ -568,18 +569,30 @@ static void onConfigReload() {
   g_pCarouselManager->rebuildAll();
 }
 
+SP<HOOK_CALLBACK_FN> PRENDER = nullptr;
+SP<HOOK_CALLBACK_FN> PMONITORADD = nullptr;
+SP<HOOK_CALLBACK_FN> POPENWINDOW = nullptr;
+SP<HOOK_CALLBACK_FN> PCLOSEWINDOW = nullptr;
+SP<HOOK_CALLBACK_FN> PONWINDOWMOVED = nullptr;
+SP<HOOK_CALLBACK_FN> PONRELOAD = nullptr;
+SP<HOOK_CALLBACK_FN> PONMONITORFOCUSCHANGE = nullptr;
+
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   PHANDLE = handle;
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
     throw std::runtime_error("Version mismatch");
-
-  static auto PRENDER = HyprlandAPI::registerCallbackDynamic(handle, "render", [&](void *s, SCallbackInfo &i, std::any p) { onRender(std::any_cast<eRenderStage>(p)); });
-  static auto PMONITORADD = HyprlandAPI::registerCallbackDynamic(handle, "monitorAdded", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorAdded(); });
-  static auto POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
-  static auto PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
-  static auto PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(p); });
-  static auto PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
-  static auto PONMONITORFOCUSCHANGE = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocusChange(std::any_cast<PHLMONITOR>(p)); });
+  try {
+    PRENDER = HyprlandAPI::registerCallbackDynamic(handle, "render", [&](void *s, SCallbackInfo &i, std::any p) { onRender(std::any_cast<eRenderStage>(p)); });
+    PMONITORADD = HyprlandAPI::registerCallbackDynamic(handle, "monitorAdded", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorAdded(); });
+    POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
+    PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
+    PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(p); });
+    PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
+    PONMONITORFOCUSCHANGE = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocusChange(std::any_cast<PHLMONITOR>(p)); });
+  } catch (const std::exception &e) {
+    Log::logger->log(Log::ERR, "Failed to register callbacks: {}", e.what());
+    return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
+  }
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
@@ -603,18 +616,22 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
   MONITOR = Desktop::focusState()->monitor();
 
-  auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
-  if (keyhooklookup.size() != 1) {
-    for (auto &f : keyhooklookup)
-      Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", f.address, f.signature, f.demangled);
-    throw std::runtime_error("CKeybindManager::onKeyEvent not found");
+  try {
+    auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
+    if (keyhooklookup.size() != 1) {
+      for (auto &f : keyhooklookup)
+        Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", f.address, f.signature, f.demangled);
+      throw std::runtime_error("CKeybindManager::onKeyEvent not found");
+    }
+    Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
+                     keyhooklookup[0].demangled);
+    keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
+    auto success = keyhookfn->hook();
+    if (!success)
+      throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");
+  } catch (const std::exception &e) {
+    Log::logger->log(Log::ERR, "Failed to hook CKeybindManager::onKeyEvent: {}", e.what());
   }
-  Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
-                   keyhooklookup[0].demangled);
-  keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
-  auto success = keyhookfn->hook();
-  if (!success)
-    throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");
 
   return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
 }
@@ -622,6 +639,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 APICALL EXPORT void PLUGIN_EXIT() {
   keyhookfn->unhook();
   g_pCarouselManager.reset();
+  PRENDER = nullptr;
+  PMONITORADD = nullptr;
+  POPENWINDOW = nullptr;
+  PCLOSEWINDOW = nullptr;
+  PONWINDOWMOVED = nullptr;
+  PONRELOAD = nullptr;
+  PONMONITORFOCUSCHANGE = nullptr;
   MONITOR = nullptr;
   PHANDLE = nullptr;
 }
