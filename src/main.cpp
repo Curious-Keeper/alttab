@@ -69,6 +69,9 @@ public:
     }
 
     refreshLayout(true);
+
+    if (MONITOR)
+      g_pCompositor->scheduleFrameForMonitor(MONITOR);
   }
 
   void damageMonitors() {
