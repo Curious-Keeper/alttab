@@ -1,6 +1,8 @@
 #include "../include/elements.hpp"
 #include "../include/defines.hpp"
 #include "../include/helpers.hpp"
+#include "../include/manager.hpp"
+#include <src/Compositor.hpp>
 #define private public
 #include <hyprland/src/render/Renderer.hpp>
 #undef private
@@ -138,6 +140,18 @@ void WindowContainer::update(const double delta) {
 
   border->pos = Vector2D(0, 0);
   border->size = Vector2D(curSize.x, curSize.y);
+  /* Silly button for later.
+    // const auto pad = 4;
+    closeButton->size = {header->fontsize, header->fontsize};
+    // closeButton->size -= {pad * 2, pad * 2};
+    closeButton->pos = Vector2D((int)(curSize.x - (closeButton->size.x)), 0);
+    // closeButton->pos = Vector2D((int)(curSize.x - (closeButton->size.x + pad * 2)), 0);
+    //  closeButton->pos += {pad, pad};
+
+    closeButton->label->size = closeButton->size;
+    closeButton->label->pos = closeButton->pos;
+  */
+  Log::logger->log(Log::TRACE, "[{}] WindowContainer::update, closeButton size: {}", PLUGIN_NAME, closeButton->size);
   Container::update(delta);
 }
 
@@ -146,12 +160,30 @@ void WindowContainer::draw(const Vector2D &offset) {
   Container::draw(offset.round());
 }
 
+bool WindowContainer::onMouseClick(const Vector2D &mousePos) {
+  if (closeButton && closeButton->onMouseClick(mousePos)) {
+    Log::logger->log(Log::ERR, "Close button clicked!");
+    return true;
+  }
+
+  if (Element::onMouseClick(mousePos)) {
+    if (!g_pCarouselManager) {
+      Log::logger->log(Log::ERR, "CarouselManager not initialized");
+      return false;
+    }
+    g_pCarouselManager->updateSelection(this);
+    return true;
+  }
+
+  return false;
+}
 WindowContainer::WindowContainer(PHLWINDOW window) : window(window) {
   Log::logger->log(Log::TRACE, "[{}] WindowContainer::WindowContainer", PLUGIN_NAME);
   header = add<TextBox>(window, TITLECOLOR, FONTSIZE);
   snapshot = add<WindowSnapshot>(window);
   border = add<BorderBox>(window, BORDERSIZE, BORDERROUNDING, BORDERROUNDINGPOWER);
-
+  auto closeLabel = makeUnique<Label>("X", CHyprColor{1.0f, 1.0f, 1.0f, 1.0f}, FONTSIZE);
+  closeButton = add<Button>(CHyprColor{0.8f, 0.0f, 0.0f, 0.6f}, [this]() { g_pCompositor->closeWindow(this->window); }, std::move(closeLabel));
   alpha = 1.0f;
 };
 
@@ -165,3 +197,62 @@ void BorderBox::draw(const Vector2D &offset) {
   g_pHyprOpenGL->renderBorder(box, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = rounding, .roundingPower = power, .borderSize = bordersize, .a = alphaAbs()});
 }
 void BorderBox::update(const double delta) { alpha.tick(delta, ANIMATIONSPEED); }
+
+void Label::draw(const Vector2D &offset) {
+  if (size.x <= 1 || size.y <= 1) {
+    Log::logger->log(Log::ERR, "[{}] Label::draw, invalid size: {}", PLUGIN_NAME, size);
+    return;
+  }
+
+  const auto pad = 1;
+  pos += offset;
+  // pos += {pad, pad};
+  // size -= {pad * 3, pad * 2};
+
+  if (!texture)
+    texture = g_pHyprOpenGL->renderText(text, color, fontsize, false, "", 1, 800);
+  if (!texture)
+    return;
+  g_pHyprOpenGL->renderTexture(texture, CBox{pos, size}, {});
+}
+
+void Button::draw(const Vector2D &offset) {
+  Log::logger->log(Log::TRACE, "[{}] Button::draw", PLUGIN_NAME);
+  Vector2D renderPos = pos + offset;
+  float drawAlpha = alphaAbs();
+
+  CHyprColor drawCol = hovered ? color : color;
+
+  if (size.x <= 1 || size.y <= 1) {
+    Log::logger->log(Log::ERR, "[{}] Button::draw, invalid size: {}", PLUGIN_NAME, size);
+    return;
+  }
+  CBox renderBox = {renderPos, size * scale.current};
+  g_pHyprOpenGL->renderRect(renderBox, drawCol, {.round = 2});
+  if (label) {
+    label->draw(offset);
+  }
+}
+
+bool Button::onMouseClick(const Vector2D &mousePos) {
+  if (Element::onMouseClick(mousePos) && onClick) {
+    onClick();
+    return true;
+  }
+  return false;
+}
+
+void Button::onHoverChanged() {
+  if (hovered) {
+    scale.target = 1.1f;
+    alpha.target = 1.0f;
+  } else {
+    scale.target = 1.0f;
+    alpha.target = 0.8f;
+  }
+}
+Button::Button(CHyprColor col, std::function<void()> callback, UP<Label> label) : color(col), onClick(callback), label(std::move(label)) {
+  if (label) {
+    label->setParent(this);
+  }
+}
