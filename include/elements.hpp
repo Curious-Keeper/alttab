@@ -1,6 +1,7 @@
 #pragma once
 
 #include "defines.hpp"
+#include <cstddef>
 #include <hyprland/src/defines.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -211,48 +212,29 @@ public:
   void draw(const Vector2D &offset) override;
 };
 
+class Label : public Element {
+public:
+  std::string text;
+  CHyprColor color;
+  int fontsize;
+  SP<CTexture> texture = nullptr;
+  Label(std::string text, CHyprColor color, int fontsize) : text(text), color(color), fontsize(fontsize) {};
+  void draw(const Vector2D &offset) override;
+  void update(const double delta) override { Element::update(delta); }
+};
+
 class Button : public Element {
 public:
   CHyprColor color;
   std::function<void()> onClick;
+  UP<Label> label;
 
-  Button(CHyprColor col, std::function<void()> callback)
-      : color(col), onClick(callback) {}
-
+  Button(CHyprColor col, std::function<void()> callback, UP<Label> label = nullptr);
   void update(const double delta) override { alpha.tick(delta, ANIMATIONSPEED); }
+  void draw(const Vector2D &offset) override;
 
-  void draw(const Vector2D &offset) override {
-    Log::logger->log(Log::TRACE, "[{}] Button::draw", PLUGIN_NAME);
-    Vector2D renderPos = pos + offset;
-    float drawAlpha = alphaAbs();
-
-    CHyprColor drawCol = hovered ? color : color;
-
-    if (size.x <= 1 || size.y <= 1) {
-      Log::logger->log(Log::ERR, "[{}] Button::draw, invalid size: {}", PLUGIN_NAME, size);
-      return;
-    }
-    CBox renderBox = {renderPos, size * scale.current};
-    g_pHyprOpenGL->renderRect(renderBox, drawCol, {.round = 2});
-  }
-
-  bool onMouseClick(const Vector2D &mousePos) override {
-    if (Element::onMouseClick(mousePos) && onClick) {
-      onClick();
-      return true;
-    }
-    return false;
-  }
-
-  void onHoverChanged() override {
-    if (hovered) {
-      scale.target = 1.1f;
-      alpha.target = 1.0f;
-    } else {
-      scale.target = 1.0f;
-      alpha.target = 0.8f;
-    }
-  }
+  bool onMouseClick(const Vector2D &mousePos) override;
+  void onHoverChanged() override;
 };
 
 class WindowContainer : public Container {
