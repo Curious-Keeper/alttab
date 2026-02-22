@@ -27,7 +27,7 @@ rethonk:
 
 install:
 	hyprctl plugin unload ~/.config/hypr/plugins/$(TARGET).so
-	cp build/$(TARGET).so ~/.config/hypr/plugins/
+	cp build/$(TARGET).so ~/.config/hypr/plugins/$(TARGET).so
 	hyprctl plugin load ~/.config/hypr/plugins/$(TARGET).so
 
 .PHONY: all release run trace debug

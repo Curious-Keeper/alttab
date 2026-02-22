@@ -3,9 +3,11 @@
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprlang.hpp>
+#include <hyprutils/math/Misc.hpp>
 #include <linux/input-event-codes.h>
 #include <src/Compositor.hpp>
 #include <src/config/ConfigDataValues.hpp>
+#include <src/config/ConfigManager.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/devices/IKeyboard.hpp>
@@ -16,6 +18,8 @@
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
   return HYPRLAND_API_VERSION;
 }
+
+static bool unloadGuard = false;
 
 static void onRender(eRenderStage stage) {
   if (!g_pCarouselManager->active)
@@ -95,7 +99,7 @@ CFunctionHook *keyhookfn = nullptr;
 typedef bool (*CKeybindManager_onKeyEvent)(void *self, std::any &event, SP<IKeyboard> pKeyboard);
 
 static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
-  if (!keyhookfn || !keyhookfn->m_original)
+  if (!keyhookfn || !keyhookfn->m_original || unloadGuard)
     return true;
 
   auto e = std::any_cast<IKeyboard::SKeyEvent>(event);
@@ -104,7 +108,6 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
   if (!g_pCarouselManager->active && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     if (e.keycode == 15 && (MODS & HL_MODIFIER_ALT)) {
       g_pCarouselManager->activate();
-      g_pCarouselManager->next();
       return false;
     }
   }
@@ -166,6 +169,7 @@ static void onMouseClick(SCallbackInfo &i, std::any p) {
 
   i.cancelled = true;
   Vector2D mouseCoords = g_pInputManager->getMouseCoordsInternal();
+  mouseCoords *= MONITOR->m_scale;
 
   auto list = g_pCarouselManager->getRenderList();
   for (auto *el : list) {
@@ -190,7 +194,9 @@ static void onMouseMove(SCallbackInfo &i, std::any p) {
 };
 
 // Straight from ConfigManager.cpp. THANKS GUYS!
-static Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
+inline Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
+  if (unloadGuard)
+    return {};
   std::string V = VALUE;
 
   if (!*data)
@@ -249,31 +255,15 @@ static Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **
   return result;
 }
 
-static void configHandleGradientDestroy(void **data) {
+inline void configHandleGradientDestroy(void **data) {
+  if (unloadGuard)
+    return;
   if (*data)
     delete sc<CGradientValueData *>(*data);
 }
 
 static void onConfigReload() {
   Log::logger->log(Log::TRACE, "[{}] onConfigReload", PLUGIN_NAME);
-  try {
-    FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
-    BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
-    BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
-    BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
-    ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
-    INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
-    WINDOW_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:window_spacing");
-    WINDOW_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
-    MONITOR_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:monitor_spacing");
-    MONITOR_SIZE_ACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_active");
-    MONITOR_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_inactive");
-    ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
-    UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
-    INCLUDE_SPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
-  } catch (const std::exception &e) {
-    Log::logger->log(Log::ERR, "Failed to get config value: {}", e.what());
-  }
   g_pCarouselManager->rebuildAll();
 }
 
@@ -284,26 +274,33 @@ SP<HOOK_CALLBACK_FN> PCLOSEWINDOW = nullptr;
 SP<HOOK_CALLBACK_FN> PONWINDOWMOVED = nullptr;
 SP<HOOK_CALLBACK_FN> PONRELOAD = nullptr;
 SP<HOOK_CALLBACK_FN> PONMONITORFOCUSCHANGE = nullptr;
+SP<HOOK_CALLBACK_FN> PONMOUSECLICK = nullptr;
+SP<HOOK_CALLBACK_FN> PONMOUSEMOVE = nullptr;
+
+template <typename T = void *>
+void reg(HANDLE handle, SP<HOOK_CALLBACK_FN> &ptr, const std::string &event, auto &&func) {
+  ptr = HyprlandAPI::registerCallbackDynamic(handle, event, [func, event](void *s, SCallbackInfo &i, std::any p) {
+    if (unloadGuard || !g_pCarouselManager)
+      return;
+
+    if constexpr (std::is_same_v<T, void *>) {
+      func();
+    } else if constexpr (std::is_same_v<T, std::pair<SCallbackInfo &, std::any>>) {
+      func(i, p);
+    } else {
+      try {
+        func(std::any_cast<T>(p));
+      } catch (const std::bad_any_cast &e) {
+        Log::logger->log(Log::ERR, "[{}] Callback {} cast failed: {}", PLUGIN_NAME, event, e.what());
+      }
+    }
+  });
+}
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   PHANDLE = handle;
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
     throw std::runtime_error("Version mismatch");
-  try {
-    static auto PRENDER = HyprlandAPI::registerCallbackDynamic(handle, "render", [&](void *s, SCallbackInfo &i, std::any p) { onRender(std::any_cast<eRenderStage>(p)); });
-    static auto PMONITORADD = HyprlandAPI::registerCallbackDynamic(handle, "monitorAdded", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorAdded(); });
-    static auto POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
-    static auto PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
-    static auto PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(p); });
-    static auto PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
-    static auto PONMONITORFOCUSCHANGE = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocusChange(std::any_cast<PHLMONITOR>(p)); });
-    static auto PONMOUSECLICKC = HyprlandAPI::registerCallbackDynamic(handle, "mouseButton", [&](void *s, SCallbackInfo &i, std::any p) { onMouseClick(i, p); });
-    static auto PONMOUSEMOVE = HyprlandAPI::registerCallbackDynamic(handle, "mouseMove", [&](void *s, SCallbackInfo &i, std::any p) { onMouseMove(i, p); });
-
-  } catch (const std::exception &e) {
-    Log::logger->log(Log::ERR, "Failed to register callbacks: {}", e.what());
-    return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
-  }
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
@@ -320,8 +317,22 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::INT{10});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_active", Hyprlang::FLOAT{0.4});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive", Hyprlang::FLOAT{0.3});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur_enabled", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{0.6});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_enabled", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_amount", Hyprlang::FLOAT{0.15});
 
   g_pCarouselManager = makeUnique<CarouselManager>();
+
+  reg(handle, PMONITORADD, "monitorAdded", []() { onMonitorAdded(); });
+  reg(handle, PONRELOAD, "configReloaded", []() { onConfigReload(); });
+  reg<eRenderStage>(handle, PRENDER, "render", [](auto p) { onRender(p); });
+  reg<PHLWINDOW>(handle, POPENWINDOW, "openWindow", [](auto p) { onWindowCreated(p); });
+  reg<PHLWINDOW>(handle, PCLOSEWINDOW, "closeWindow", [](auto p) { onWindowClosed(p); });
+  reg<PHLMONITOR>(handle, PONMONITORFOCUSCHANGE, "focusedMon", [](auto p) { onMonitorFocusChange(p); });
+  reg<std::vector<std::any>>(handle, PONWINDOWMOVED, "moveWindow", [](auto p) { onWindowMoved(p); });
+  reg<std::pair<SCallbackInfo &, std::any>>(handle, PONMOUSECLICK, "mouseButton", [](auto &i, auto p) { onMouseClick(i, p); });
+  reg<std::pair<SCallbackInfo &, std::any>>(handle, PONMOUSEMOVE, "mouseMove", [](auto &i, auto p) { onMouseMove(i, p); });
 
   HyprlandAPI::reloadConfig();
 
@@ -337,21 +348,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
                      keyhooklookup[0].demangled);
     keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
-    auto success = keyhookfn->hook();
-    if (!success)
+    if (!keyhookfn->hook())
       throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");
   } catch (const std::exception &e) {
     Log::logger->log(Log::ERR, "Failed to hook CKeybindManager::onKeyEvent: {}", e.what());
   }
-
   return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+  unloadGuard = true;
   g_pCarouselManager.reset();
-  keyhookfn->unhook();
-  keyhookfn = nullptr;
-
-  MONITOR = nullptr;
-  PHANDLE = nullptr;
 }

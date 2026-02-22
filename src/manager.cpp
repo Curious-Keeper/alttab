@@ -1,5 +1,7 @@
 #include "../include/manager.hpp"
 #include <src/Compositor.hpp>
+#include <src/desktop/history/WindowHistoryTracker.hpp>
+#include <src/desktop/state/FocusState.hpp>
 #include <src/managers/input/InputManager.hpp>
 
 CarouselManager::CarouselManager() {
@@ -23,27 +25,33 @@ void CarouselManager::activate() {
   MONITOR = Desktop::focusState()->monitor();
   lastframe = std::chrono::steady_clock::now();
 
-  auto focusedWindow = Desktop::focusState()->window();
-  bool foundFocus = false;
+  const auto focusedWindow = Desktop::focusState()->window();
+  const auto hist = Desktop::History::windowTracker()->fullHistory();
+  auto prevWindow = (hist.size() > 1) ? *(hist.end() - 2) : focusedWindow;
 
   if (!MONITOR || !focusedWindow) {
     Log::logger->log(Log::ERR, "Failed to get focused window or monitor");
     return;
   }
 
-  int mIdx = 0;
-  for (auto &[id, mon] : monitors) {
-    for (size_t wIdx = 0; wIdx < mon.windows.size(); ++wIdx) {
-      if (mon.windows[wIdx]->window == focusedWindow) {
+  auto updateFocus = [&]() {
+    for (auto [mIdx, mon_entry] : monitors | std::views::enumerate) {
+      auto &[id, mon] = mon_entry;
+      auto it = std::ranges::find_if(mon.windows, [&](const auto &w) {
+        return w->window == prevWindow;
+      });
+
+      if (it != mon.windows.end()) {
         activeMonitorIndex = mIdx;
-        mon.activeIndex = wIdx;
-        foundFocus = true;
-        break;
+        mon.activeIndex = std::distance(mon.windows.begin(), it);
+        return true;
       }
     }
-    if (foundFocus)
-      break;
-    mIdx++;
+    return false;
+  };
+
+  if (!updateFocus()) {
+    Log::logger->log(Log::INFO, "[{}] prevWindow not found in monitors; focus remains default", PLUGIN_NAME);
   }
 
   refreshLayout(true);
@@ -113,7 +121,7 @@ void CarouselManager::confirm() {
     // Fuck the stupid follow mouse behaviour. We force it.
     g_pInputManager->unconstrainMouse();
     window->m_relativeCursorCoordsOnLastWarp = g_pInputManager->getMouseCoordsInternal() - window->m_position;
-    Desktop::focusState()->fullWindowFocus(window);
+    Desktop::focusState()->fullWindowFocus(window, Desktop::eFocusReason::FOCUS_REASON_KEYBIND);
     if (window->m_monitor != MONITOR) {
       window->warpCursor();
       g_pInputManager->m_forcedFocus = window;
@@ -126,6 +134,8 @@ void CarouselManager::confirm() {
 }
 
 bool CarouselManager::shouldIncludeWindow(PHLWINDOW w) {
+  static auto INCLUDE_SPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
+
   if (INCLUDE_SPECIAL)
     return true;
   return w->m_workspace && !w->m_workspace->m_isSpecialWorkspace;
@@ -169,6 +179,14 @@ void CarouselManager::rebuildAll() {
 void CarouselManager::refreshLayout(bool snap) {
   if (!MONITOR || monitors.empty())
     return;
+
+  static auto MONITOR_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:monitor_spacing");
+  static auto MONITOR_SIZE_ACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_active");
+  static auto MONITOR_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_inactive");
+  static auto WINDOW_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:window_spacing");
+  static auto WINDOW_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
+  static auto BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
+  static auto UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
 
   const auto msize = (MONITOR->m_size * MONITOR->m_scale).round();
   const auto center = msize / 2.0;
@@ -271,11 +289,11 @@ void CarouselManager::update() {
 
       std::chrono::milliseconds threshold;
       if (isWindowActive) {
-        threshold = std::chrono::milliseconds(30);
+        threshold = std::chrono::milliseconds((1000 / 30));
       } else if (onScreen) {
-        threshold = std::chrono::milliseconds(200);
+        threshold = std::chrono::milliseconds((1000 / 10));
       } else {
-        threshold = std::chrono::milliseconds(1000);
+        threshold = std::chrono::milliseconds((1000 / 5));
       }
 
       if (!w->snapshot->ready || age > threshold) {
@@ -304,8 +322,10 @@ void CarouselManager::update() {
     return a->snapshot->lastUpdated < b->snapshot->lastUpdated;
   });
 
+  Log::logger->log(Log::TRACE, "[{}] update (needsUpdate.size={})", PLUGIN_NAME, needsUpdate.size());
+
   int processed = 0;
-  const int FRAME_BUDGET = 1;
+  const int FRAME_BUDGET = 2;
   for (auto *w : needsUpdate) {
     if (processed >= FRAME_BUDGET)
       break;

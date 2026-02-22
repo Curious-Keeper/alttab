@@ -4,10 +4,12 @@
 #include <cstddef>
 #include <hyprland/src/defines.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
-#include <hyprland/src/render/Renderer.hpp>
 #include <src/debug/log/Logger.hpp>
 #include <src/desktop/state/FocusState.hpp>
 
+#define private public
+#include <src/render/Renderer.hpp>
+#undef private
 template <typename T>
 struct AnimatedValue {
   T current{};
@@ -53,9 +55,11 @@ public:
     this->parent = parent;
   };
   virtual void update(const double delta) {
+    auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
     tick(delta, ANIMATIONSPEED);
   };
   virtual void tick(const double delta, float speed) {
+    static auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
     animPos.tick(delta, ANIMATIONSPEED);
     animSize.tick(delta, ANIMATIONSPEED);
     alpha.tick(delta, ANIMATIONSPEED);
@@ -97,14 +101,13 @@ public:
   };
 
   virtual bool onMouseClick(const Vector2D &mousePos) {
-    Vector2D absolutePos = pos;
+    Vector2D elementPos = pos;
     Element *p = parent;
-
     while (p) {
-      absolutePos = absolutePos + p->pos;
+      elementPos = elementPos + p->pos;
       p = p->parent;
     }
-    CBox box = {absolutePos.x, absolutePos.y, size.x, size.y};
+    CBox box = {elementPos.x, elementPos.y, size.x, size.y};
     return box.containsPoint(mousePos);
   }
 
@@ -230,7 +233,10 @@ public:
   UP<Label> label;
 
   Button(CHyprColor col, std::function<void()> callback, UP<Label> label = nullptr);
-  void update(const double delta) override { alpha.tick(delta, ANIMATIONSPEED); }
+  void update(const double delta) override {
+    static auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
+    alpha.tick(delta, ANIMATIONSPEED);
+  }
   void draw(const Vector2D &offset) override;
 
   bool onMouseClick(const Vector2D &mousePos) override;
