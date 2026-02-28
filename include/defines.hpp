@@ -1,11 +1,11 @@
 #pragma once
 
 #include <hyprlang.hpp>
+#include <hyprland/src/plugins/HookSystem.hpp>
 #include <src/config/ConfigDataValues.hpp>
 #include <src/config/ConfigValue.hpp>
 #include <src/desktop/DesktopTypes.hpp>
 #include <src/helpers/Color.hpp>
-#include <src/managers/HookSystemManager.hpp>
 inline PHLMONITOR MONITOR = nullptr;
 inline HANDLE PHANDLE = nullptr;
 

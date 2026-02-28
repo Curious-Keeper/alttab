@@ -1,5 +1,6 @@
 #include "../include/renderpasses.hpp"
 #include <algorithm>
+#include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprlang.hpp>
@@ -134,7 +135,7 @@ public:
       // Fuck the stupid follow mouse behaviour. We force it.
       g_pInputManager->unconstrainMouse();
       window->m_relativeCursorCoordsOnLastWarp = g_pInputManager->getMouseCoordsInternal() - window->m_position;
-      Desktop::focusState()->fullWindowFocus(window);
+      Desktop::focusState()->fullWindowFocus(window, Desktop::eFocusReason::FOCUS_REASON_DESKTOP_STATE_CHANGE);
       if (window->m_monitor != MONITOR) {
         window->warpCursor();
         g_pInputManager->m_forcedFocus = window;
@@ -419,6 +420,23 @@ static void onMonitorFocusChange(PHLMONITOR m) {
   MONITOR = m;
 }
 
+static void onWindowMoveToWorkspace(PHLWINDOW w, PHLWORKSPACE ws) {
+  if (!g_pCarouselManager->active)
+    return;
+  g_pCarouselManager->rebuildAll();
+}
+
+struct EventListeners {
+  Hyprutils::Signal::CHyprSignalListener render;
+  Hyprutils::Signal::CHyprSignalListener monitorAdded;
+  Hyprutils::Signal::CHyprSignalListener windowOpen;
+  Hyprutils::Signal::CHyprSignalListener windowClose;
+  Hyprutils::Signal::CHyprSignalListener windowMoveToWorkspace;
+  Hyprutils::Signal::CHyprSignalListener configReloaded;
+  Hyprutils::Signal::CHyprSignalListener monitorFocused;
+};
+static EventListeners g_eventListeners;
+
 static CFunctionHook *keyhookfn = nullptr;
 typedef bool (*CKeybindManager_onKeyEvent)(void *self, std::any &event, SP<IKeyboard> pKeyboard);
 
@@ -580,13 +598,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
     throw std::runtime_error("Version mismatch");
 
-  static auto PRENDER = HyprlandAPI::registerCallbackDynamic(handle, "render", [&](void *s, SCallbackInfo &i, std::any p) { onRender(std::any_cast<eRenderStage>(p)); });
-  static auto PMONITORADD = HyprlandAPI::registerCallbackDynamic(handle, "monitorAdded", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorAdded(); });
-  static auto POPENWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "openWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowCreated(std::any_cast<PHLWINDOW>(p)); });
-  static auto PCLOSEWINDOW = HyprlandAPI::registerCallbackDynamic(handle, "closeWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowClosed(std::any_cast<PHLWINDOW>(p)); });
-  static auto PONWINDOWMOVED = HyprlandAPI::registerCallbackDynamic(handle, "moveWindow", [&](void *s, SCallbackInfo &i, std::any p) { onWindowMoved(p); });
-  static auto PONRELOAD = HyprlandAPI::registerCallbackDynamic(handle, "configReloaded", [&](void *s, SCallbackInfo &i, std::any p) { onConfigReload(); });
-  static auto PONMONITORFOCUSCHANGE = HyprlandAPI::registerCallbackDynamic(handle, "focusedMon", [&](void *s, SCallbackInfo &i, std::any p) { onMonitorFocusChange(std::any_cast<PHLMONITOR>(p)); });
+  g_eventListeners.render = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { onRender(stage); });
+  g_eventListeners.monitorAdded = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR) { onMonitorAdded(); });
+  g_eventListeners.windowOpen = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) { onWindowCreated(w); });
+  g_eventListeners.windowClose = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) { onWindowClosed(w); });
+  g_eventListeners.windowMoveToWorkspace = Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW w, PHLWORKSPACE ws) { onWindowMoveToWorkspace(w, ws); });
+  g_eventListeners.configReloaded = Event::bus()->m_events.config.reloaded.listen([]() { onConfigReload(); });
+  g_eventListeners.monitorFocused = Event::bus()->m_events.monitor.focused.listen([](PHLMONITOR m) { onMonitorFocusChange(m); });
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
@@ -628,6 +646,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
 APICALL EXPORT void PLUGIN_EXIT() {
   keyhookfn->unhook();
+  g_eventListeners = {};
   g_pCarouselManager.reset();
   MONITOR = nullptr;
   PHANDLE = nullptr;
