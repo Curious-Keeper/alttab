@@ -34,10 +34,14 @@ public:
     if (!mon)
       return;
 
+    static auto BLURENABLED = *CConfigValue<Hyprlang::INT>("plugin:alttab:blur_enabled");
+    static auto DIMAMOUNT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:dim_amount");
+    auto DIMCOLOR = CHyprColor(0.0f, 0.0f, 0.0f, DIMAMOUNT);
+
     auto localBox = CBox{{0, 0}, mon->m_size}.scale(mon->m_scale);
     auto renderdata = CHyprOpenGLImpl::SRectRenderData{
         .damage = &damage,
-        .blur = (*BLURENABLED ? true : false),
+        .blur = (BLURENABLED ? true : false),
     };
 
     g_pHyprOpenGL->renderRect(localBox, DIMCOLOR, renderdata);

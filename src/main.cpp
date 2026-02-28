@@ -1,14 +1,15 @@
+#include "../include/manager.hpp"
 #include "../include/renderpasses.hpp"
-#include <algorithm>
-#include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprlang.hpp>
+#include <hyprutils/math/Misc.hpp>
 #include <linux/input-event-codes.h>
 #include <src/Compositor.hpp>
 #include <src/config/ConfigDataValues.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/devices/IKeyboard.hpp>
+#include <src/event/EventBus.hpp>
 #include <src/managers/input/InputManager.hpp>
 #include <src/render/Renderer.hpp>
 #include <xkbcommon/xkbcommon-keysyms.h>
@@ -17,334 +18,7 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
   return HYPRLAND_API_VERSION;
 }
 
-class CarouselManager {
-public:
-  bool active = false;
-  struct Monitor {
-    std::vector<UP<WindowContainer>> windows;
-    size_t activeIndex = 0;
-    int offset = 0;
-  };
-  std::map<int, Monitor> monitors;
-  std::chrono::time_point<std::chrono::steady_clock> lastframe = std::chrono::steady_clock::now();
-  size_t activeMonitorIndex = 0;
-
-  CarouselManager() {
-    Log::logger->log(Log::TRACE, "[{}] CarouselManager ctor", PLUGIN_NAME);
-  }
-
-  void toggle() {
-    active = !active;
-    if (!active)
-      deactivate();
-  }
-
-  void activate() {
-    if (active)
-      return;
-
-    rebuildAll();
-    if (monitors.empty())
-      return;
-
-    active = true;
-    MONITOR = Desktop::focusState()->monitor();
-    lastframe = std::chrono::steady_clock::now();
-
-    auto focusedWindow = Desktop::focusState()->window();
-    bool foundFocus = false;
-
-    int mIdx = 0;
-    for (auto &[id, mon] : monitors) {
-      for (size_t wIdx = 0; wIdx < mon.windows.size(); ++wIdx) {
-        if (mon.windows[wIdx]->window == focusedWindow) {
-          activeMonitorIndex = mIdx;
-          mon.activeIndex = wIdx;
-          foundFocus = true;
-          break;
-        }
-      }
-      if (foundFocus)
-        break;
-      mIdx++;
-    }
-
-    refreshLayout(true);
-  }
-
-  void damageMonitors() {
-    for (auto &mon : g_pCompositor->m_monitors) {
-      if (!mon || !mon->m_enabled)
-        continue;
-      g_pHyprRenderer->damageMonitor(mon);
-    }
-  }
-
-  void deactivate() {
-    active = false;
-    g_pHyprRenderer->m_renderPass.removeAllOfType("TabCarouselPassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("TabCarouselBlurElement");
-    damageMonitors();
-  }
-
-  void next(bool snap = false) {
-    if (monitors.empty())
-      return;
-
-    auto it = std::next(monitors.begin(), activeMonitorIndex);
-    auto &mon = it->second;
-
-    if (mon.windows.empty())
-      return;
-
-    mon.activeIndex = (mon.activeIndex + 1) % mon.windows.size();
-    refreshLayout(snap);
-  }
-
-  void prev(bool snap = false) {
-    if (monitors.empty())
-      return;
-
-    auto it = std::next(monitors.begin(), activeMonitorIndex);
-    auto &mon = it->second;
-
-    if (mon.windows.empty())
-      return;
-
-    mon.activeIndex = (mon.activeIndex + mon.windows.size() - 1) % mon.windows.size();
-    refreshLayout(snap);
-  }
-
-  void up(bool snap = false) {
-    if (monitors.empty())
-      return;
-    activeMonitorIndex = (activeMonitorIndex - 1 + monitors.size()) % monitors.size();
-    refreshLayout(snap);
-  }
-
-  void down(bool snap = false) {
-    if (monitors.empty())
-      return;
-    activeMonitorIndex = (activeMonitorIndex + 1) % monitors.size();
-    refreshLayout(snap);
-  }
-
-  void confirm() {
-    if (!monitors.empty()) {
-      auto window = monitors[activeMonitorIndex].windows[monitors[activeMonitorIndex].activeIndex]->window;
-      // Fuck the stupid follow mouse behaviour. We force it.
-      g_pInputManager->unconstrainMouse();
-      window->m_relativeCursorCoordsOnLastWarp = g_pInputManager->getMouseCoordsInternal() - window->m_position;
-      Desktop::focusState()->fullWindowFocus(window, Desktop::eFocusReason::FOCUS_REASON_DESKTOP_STATE_CHANGE);
-      if (window->m_monitor != MONITOR) {
-        window->warpCursor();
-        g_pInputManager->m_forcedFocus = window;
-        g_pInputManager->simulateMouseMovement();
-        g_pInputManager->m_forcedFocus.reset();
-        Desktop::focusState()->rawMonitorFocus(MONITOR);
-      }
-    }
-    deactivate();
-  }
-
-  static bool shouldIncludeWindow(PHLWINDOW w) {
-    if (INCLUDE_SPECIAL)
-      return true;
-    return w->m_workspace && !w->m_workspace->m_isSpecialWorkspace;
-  }
-
-  void rebuildAll() {
-    Log::logger->log(Log::TRACE, "[{}] rebuildAll", PLUGIN_NAME);
-    monitors.clear();
-
-    for (auto &el : g_pCompositor->m_windows) {
-      if (!el || !el->m_isMapped || !el->m_monitor)
-        continue;
-
-      if (shouldIncludeWindow(el)) {
-        auto id = el->m_monitor->m_id;
-        monitors[id].windows.emplace_back(makeUnique<WindowContainer>(el));
-      }
-    }
-    refreshLayout();
-  }
-
-  void refreshLayout(bool snap = false) {
-    if (!MONITOR || monitors.empty())
-      return;
-
-    const auto msize = (MONITOR->m_size * MONITOR->m_scale).round();
-    const auto center = msize / 2.0;
-    const auto spacing = BORDERSIZE + WINDOW_SPACING;
-
-    const double activeRowH = msize.y * MONITOR_SIZE_ACTIVE;
-    const double inactiveRowH = msize.y * MONITOR_SIZE_INACTIVE;
-
-    const double verticalStep = ((activeRowH + (inactiveRowH * WINDOW_SIZE_INACTIVE)) / 2.0) + MONITOR_SPACING;
-
-    int currentRow = 0;
-    for (auto &[id, monData] : monitors) {
-      auto activeList = monData.windows | std::views::transform([](auto &w) { return w.get(); }) | std::views::filter([](auto *w) { return !w->shouldBeRemoved(); }) | std::ranges::to<std::vector<WindowContainer *>>();
-
-      if (activeList.empty()) {
-        currentRow++;
-        continue;
-      }
-
-      bool isRowSelected = (currentRow == (int)activeMonitorIndex);
-      double rowBaseH = isRowSelected ? activeRowH : inactiveRowH;
-      double rowCenterY = center.y + (currentRow - (int)activeMonitorIndex) * verticalStep;
-
-      for (size_t j = 0; j < activeList.size(); ++j) {
-        auto goal = activeList[j]->window->m_realSize->goal();
-        double aspect = std::clamp(goal.x / std::max(goal.y, 1.0), 0.1, 5.0);
-
-        double h = (j == monData.activeIndex && isRowSelected) ? rowBaseH : (rowBaseH * WINDOW_SIZE_INACTIVE);
-        activeList[j]->animSize.set(Vector2D(h * aspect, h), snap);
-      }
-
-      auto activeWin = activeList[std::min(monData.activeIndex, activeList.size() - 1)];
-      activeWin->animPos.set(Vector2D(center.x - (activeWin->animSize.target.x / 2.0), rowCenterY - (activeWin->animSize.target.y / 2.0)), snap);
-
-      auto leftX = activeWin->animPos.target.x;
-      for (auto *w : activeList | std::views::take(monData.activeIndex) | std::views::reverse) {
-        leftX -= (w->animSize.target.x + spacing);
-        w->animPos.set(Vector2D(leftX, rowCenterY - (w->animSize.target.y / 2.0)), snap);
-      }
-
-      auto rightX = activeWin->animPos.target.x + activeWin->animSize.target.x;
-      for (auto *w : activeList | std::views::drop(monData.activeIndex + 1)) {
-        w->animPos.set(Vector2D(rightX + spacing, rowCenterY - (w->animSize.target.y / 2.0)), snap);
-        rightX += (w->animSize.target.x + spacing);
-      }
-
-      for (auto *w : activeList) {
-        bool isFocused = (w == activeWin && isRowSelected);
-        w->alpha.set(isFocused ? 1.0f : UNFOCUSEDALPHA, snap);
-        w->border->isActive = isFocused;
-      }
-
-      currentRow++;
-    }
-  }
-
-  bool isElementOnScreen(WindowContainer *w) {
-    if (!MONITOR)
-      return false;
-
-    auto mBox = CBox{MONITOR->m_position, MONITOR->m_size}.scale(MONITOR->m_scale);
-    auto wBox = CBox{w->pos, w->size};
-    return mBox.intersection(wBox).width > 0;
-  }
-
-  void update() {
-    if (!active || monitors.empty())
-      return;
-
-    auto now = std::chrono::steady_clock::now();
-    double delta = std::chrono::duration_cast<std::chrono::microseconds>(now - lastframe).count() / 1000000.0;
-    lastframe = now;
-
-    std::vector<WindowContainer *> needsUpdate;
-    size_t currentRowIdx = 0;
-    bool anyWindowsLeft = false;
-
-    for (auto it = monitors.begin(); it != monitors.end();) {
-      auto &row = it->second;
-
-      std::erase_if(row.windows, [](auto &el) { return el->shouldBeRemoved(); });
-
-      if (row.windows.empty()) {
-        it = monitors.erase(it);
-        continue;
-      }
-
-      if (row.activeIndex >= row.windows.size())
-        row.activeIndex = row.windows.empty() ? 0 : row.windows.size() - 1;
-
-      bool isRowActive = (currentRowIdx == activeMonitorIndex);
-
-      for (size_t i = 0; i < row.windows.size(); ++i) {
-        auto &w = row.windows[i];
-        w->update(delta);
-
-        auto age = now - w->snapshot->lastUpdated;
-        bool onScreen = isElementOnScreen(w.get());
-        bool isWindowActive = (isRowActive && i == row.activeIndex);
-
-        std::chrono::milliseconds threshold;
-        if (isWindowActive) {
-          threshold = std::chrono::milliseconds(30);
-        } else if (onScreen) {
-          threshold = std::chrono::milliseconds(200);
-        } else {
-          threshold = std::chrono::milliseconds(1000);
-        }
-
-        if (!w->snapshot->ready || age > threshold) {
-          needsUpdate.push_back(w.get());
-        }
-      }
-
-      anyWindowsLeft = true;
-      currentRowIdx++;
-      ++it;
-    }
-
-    if (!anyWindowsLeft) {
-      deactivate();
-      return;
-    }
-
-    if (activeMonitorIndex >= monitors.size())
-      activeMonitorIndex = monitors.empty() ? 0 : monitors.size() - 1;
-
-    std::sort(needsUpdate.begin(), needsUpdate.end(), [this](auto *a, auto *b) {
-      bool aOn = isElementOnScreen(a);
-      bool bOn = isElementOnScreen(b);
-      if (aOn != bOn)
-        return aOn;
-      return a->snapshot->lastUpdated < b->snapshot->lastUpdated;
-    });
-
-    int processed = 0;
-    const int FRAME_BUDGET = 2;
-    for (auto *w : needsUpdate) {
-      if (processed >= FRAME_BUDGET)
-        break;
-      w->snapshot->snapshot();
-      processed++;
-    }
-  }
-
-  std::vector<Element *> getRenderList() {
-    std::vector<std::pair<int, Element *>> indexed;
-
-    size_t rowIndex = 0;
-    for (auto &[id, monData] : monitors) {
-      int rowDist = std::abs(static_cast<int>(rowIndex) - static_cast<int>(activeMonitorIndex));
-
-      for (size_t winIndex = 0; winIndex < monData.windows.size(); ++winIndex) {
-        int winDist = std::abs(static_cast<int>(winIndex) - static_cast<int>(monData.activeIndex));
-
-        int priority = (rowDist * 1000) + winDist;
-        indexed.push_back({priority, monData.windows[winIndex].get()});
-      }
-      rowIndex++;
-    }
-
-    std::ranges::sort(indexed, std::greater<>{}, [](const auto &p) { return p.first; });
-
-    std::vector<Element *> result;
-    for (auto &p : indexed) {
-      result.push_back(p.second);
-    }
-
-    return result;
-  }
-};
-
-inline static UP<CarouselManager> g_pCarouselManager;
+static bool unloadGuard = false;
 
 static void onRender(eRenderStage stage) {
   if (!g_pCarouselManager->active)
@@ -389,25 +63,11 @@ static void onWindowClosed(PHLWINDOW w) {
   g_pCarouselManager->refreshLayout();
 }
 
-static void onWindowMoved(std::any p) {
+static void onWindowMoveToWorkspace(PHLWINDOW w, PHLWORKSPACE ws) {
   if (!g_pCarouselManager->active)
     return;
-
-  try {
-    auto args = std::any_cast<std::vector<std::any>>(p);
-    if (args.empty())
-      return;
-
-    auto w = std::any_cast<PHLWINDOW>(args[0]);
-    if (!w)
-      return;
-
-    Log::logger->log(Log::TRACE, "[{}] onWindowMoved for window: {}", PLUGIN_NAME, w->m_title);
-
-    g_pCarouselManager->rebuildAll();
-  } catch (const std::bad_any_cast &e) {
-    Log::logger->log(Log::ERR, "[{}] onWindowMoved: Cast failed: {}", PLUGIN_NAME, e.what());
-  }
+  Log::logger->log(Log::TRACE, "[{}] onWindowMoveToWorkspace for window: {}", PLUGIN_NAME, w->m_title);
+  g_pCarouselManager->rebuildAll();
 }
 
 static void onMonitorAdded() {
@@ -420,28 +80,11 @@ static void onMonitorFocusChange(PHLMONITOR m) {
   MONITOR = m;
 }
 
-static void onWindowMoveToWorkspace(PHLWINDOW w, PHLWORKSPACE ws) {
-  if (!g_pCarouselManager->active)
-    return;
-  g_pCarouselManager->rebuildAll();
-}
-
-struct EventListeners {
-  Hyprutils::Signal::CHyprSignalListener render;
-  Hyprutils::Signal::CHyprSignalListener monitorAdded;
-  Hyprutils::Signal::CHyprSignalListener windowOpen;
-  Hyprutils::Signal::CHyprSignalListener windowClose;
-  Hyprutils::Signal::CHyprSignalListener windowMoveToWorkspace;
-  Hyprutils::Signal::CHyprSignalListener configReloaded;
-  Hyprutils::Signal::CHyprSignalListener monitorFocused;
-};
-static EventListeners g_eventListeners;
-
 static CFunctionHook *keyhookfn = nullptr;
 typedef bool (*CKeybindManager_onKeyEvent)(void *self, std::any &event, SP<IKeyboard> pKeyboard);
 
 static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
-  if (!keyhookfn || !keyhookfn->m_original)
+  if (!keyhookfn || !keyhookfn->m_original || unloadGuard)
     return true;
 
   auto e = std::any_cast<IKeyboard::SKeyEvent>(event);
@@ -450,7 +93,6 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
   if (!g_pCarouselManager->active && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     if (e.keycode == 15 && (MODS & HL_MODIFIER_ALT)) {
       g_pCarouselManager->activate();
-      g_pCarouselManager->next();
       return false;
     }
   }
@@ -502,8 +144,42 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
   return false;
 }
 
+static void onMouseClick(IPointer::SButtonEvent const &e, Event::SCallbackInfo &i) {
+  if (!g_pCarouselManager->active)
+    return;
+  if (e.state != WL_POINTER_BUTTON_STATE_PRESSED)
+    return;
+
+  i.cancelled = true;
+  Vector2D mouseCoords = g_pInputManager->getMouseCoordsInternal();
+  mouseCoords *= MONITOR->m_scale;
+
+  auto list = g_pCarouselManager->getRenderList();
+  for (auto *el : list) {
+    if (el->shouldBeRemoved())
+      continue;
+
+    if (el->onMouseClick(mouseCoords)) {
+      break;
+    }
+  }
+}
+
+static void onMouseMove(Vector2D const &, Event::SCallbackInfo &) {
+  if (!g_pCarouselManager->active)
+    return;
+  Vector2D mousePos = g_pInputManager->getMouseCoordsInternal();
+
+  auto list = g_pCarouselManager->getRenderList();
+  for (auto *el : list) {
+    el->onMouseMove(mousePos);
+  }
+}
+
 // Straight from ConfigManager.cpp. THANKS GUYS!
-static Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
+inline Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
+  if (unloadGuard)
+    return {};
   std::string V = VALUE;
 
   if (!*data)
@@ -562,49 +238,35 @@ static Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **
   return result;
 }
 
-static void configHandleGradientDestroy(void **data) {
+inline void configHandleGradientDestroy(void **data) {
+  if (unloadGuard)
+    return;
   if (*data)
     delete sc<CGradientValueData *>(*data);
 }
 
 static void onConfigReload() {
   Log::logger->log(Log::TRACE, "[{}] onConfigReload", PLUGIN_NAME);
-  FONTSIZE = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:font_size")->getValue());
-  BORDERSIZE = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_size")->getValue());
-  BORDERROUNDINGPOWER = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_rounding_power")->getValue());
-  {
-    auto v = HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_rounding")->getValue();
-    try {
-      BORDERROUNDING = std::any_cast<Hyprlang::INT>(v);
-    } catch (...) {
-      BORDERROUNDING = (long)std::any_cast<Hyprlang::FLOAT>(v);
-    }
-  }
-  ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
-  INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
-  WINDOW_SPACING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:window_spacing")->getValue());
-  WINDOW_SIZE_INACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:window_size_inactive")->getValue());
-  MONITOR_SPACING = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_spacing")->getValue());
-  MONITOR_SIZE_ACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_size_active")->getValue());
-  MONITOR_SIZE_INACTIVE = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive")->getValue());
-  ANIMATIONSPEED = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:animation_speed")->getValue());
-  UNFOCUSEDALPHA = std::any_cast<Hyprlang::FLOAT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha")->getValue());
-  INCLUDE_SPECIAL = std::any_cast<Hyprlang::INT>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:include_special")->getValue()) != 0;
   g_pCarouselManager->rebuildAll();
 }
+
+struct EventListeners {
+  Hyprutils::Signal::CHyprSignalListener render;
+  Hyprutils::Signal::CHyprSignalListener monitorAdded;
+  Hyprutils::Signal::CHyprSignalListener windowOpen;
+  Hyprutils::Signal::CHyprSignalListener windowClose;
+  Hyprutils::Signal::CHyprSignalListener windowMoveToWorkspace;
+  Hyprutils::Signal::CHyprSignalListener configReloaded;
+  Hyprutils::Signal::CHyprSignalListener monitorFocused;
+  Hyprutils::Signal::CHyprSignalListener mouseButton;
+  Hyprutils::Signal::CHyprSignalListener mouseMove;
+};
+static EventListeners g_eventListeners;
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   PHANDLE = handle;
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
     throw std::runtime_error("Version mismatch");
-
-  g_eventListeners.render = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { onRender(stage); });
-  g_eventListeners.monitorAdded = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR) { onMonitorAdded(); });
-  g_eventListeners.windowOpen = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) { onWindowCreated(w); });
-  g_eventListeners.windowClose = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) { onWindowClosed(w); });
-  g_eventListeners.windowMoveToWorkspace = Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW w, PHLWORKSPACE ws) { onWindowMoveToWorkspace(w, ws); });
-  g_eventListeners.configReloaded = Event::bus()->m_events.config.reloaded.listen([]() { onConfigReload(); });
-  g_eventListeners.monitorFocused = Event::bus()->m_events.monitor.focused.listen([](PHLMONITOR m) { onMonitorFocusChange(m); });
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
@@ -621,31 +283,49 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::INT{10});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_active", Hyprlang::FLOAT{0.4});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive", Hyprlang::FLOAT{0.3});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur_enabled", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_enabled", Hyprlang::INT{1});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_amount", Hyprlang::FLOAT{0.15});
 
   g_pCarouselManager = makeUnique<CarouselManager>();
+
+  g_eventListeners.render = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { onRender(stage); });
+  g_eventListeners.monitorAdded = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR) { onMonitorAdded(); });
+  g_eventListeners.windowOpen = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) { onWindowCreated(w); });
+  g_eventListeners.windowClose = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) { onWindowClosed(w); });
+  g_eventListeners.windowMoveToWorkspace =
+      Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW w, PHLWORKSPACE ws) { onWindowMoveToWorkspace(w, ws); });
+  g_eventListeners.configReloaded = Event::bus()->m_events.config.reloaded.listen([]() { onConfigReload(); });
+  g_eventListeners.monitorFocused = Event::bus()->m_events.monitor.focused.listen([](PHLMONITOR m) { onMonitorFocusChange(m); });
+  g_eventListeners.mouseButton = Event::bus()->m_events.input.mouse.button.listen([](IPointer::SButtonEvent const &e, Event::SCallbackInfo &i) { onMouseClick(e, i); });
+  g_eventListeners.mouseMove = Event::bus()->m_events.input.mouse.move.listen([](Vector2D const &pos, Event::SCallbackInfo &i) { onMouseMove(pos, i); });
 
   HyprlandAPI::reloadConfig();
 
   MONITOR = Desktop::focusState()->monitor();
 
-  auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
-  if (keyhooklookup.size() != 1) {
-    for (auto &f : keyhooklookup)
-      Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", f.address, f.signature, f.demangled);
-    throw std::runtime_error("CKeybindManager::onKeyEvent not found");
+  try {
+    auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
+    if (keyhooklookup.size() != 1) {
+      for (auto &f : keyhooklookup)
+        Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", f.address, f.signature, f.demangled);
+      throw std::runtime_error("CKeybindManager::onKeyEvent not found");
+    }
+    Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
+                     keyhooklookup[0].demangled);
+    keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
+    if (!keyhookfn->hook())
+      throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");
+  } catch (const std::exception &e) {
+    Log::logger->log(Log::ERR, "Failed to hook CKeybindManager::onKeyEvent: {}", e.what());
   }
-  Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
-                   keyhooklookup[0].demangled);
-  keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
-  auto success = keyhookfn->hook();
-  if (!success)
-    throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");
-
   return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
-  keyhookfn->unhook();
+  unloadGuard = true;
+  if (keyhookfn)
+    keyhookfn->unhook();
   g_eventListeners = {};
   g_pCarouselManager.reset();
   MONITOR = nullptr;

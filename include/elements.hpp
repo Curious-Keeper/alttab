@@ -1,11 +1,15 @@
 #pragma once
 
 #include "defines.hpp"
+#include <cstddef>
 #include <hyprland/src/defines.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
-#include <hyprland/src/render/Renderer.hpp>
+#include <src/debug/log/Logger.hpp>
 #include <src/desktop/state/FocusState.hpp>
 
+#define private public
+#include <src/render/Renderer.hpp>
+#undef private
 template <typename T>
 struct AnimatedValue {
   T current{};
@@ -51,9 +55,11 @@ public:
     this->parent = parent;
   };
   virtual void update(const double delta) {
+    auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
     tick(delta, ANIMATIONSPEED);
   };
   virtual void tick(const double delta, float speed) {
+    static auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
     animPos.tick(delta, ANIMATIONSPEED);
     animSize.tick(delta, ANIMATIONSPEED);
     alpha.tick(delta, ANIMATIONSPEED);
@@ -75,6 +81,34 @@ public:
     if (!parent)
       return alpha.current;
     return alpha.current * parent->alphaAbs();
+  }
+
+  bool hovered = false;
+
+  virtual bool onMouseMove(const Vector2D &mousePos) {
+    CBox box = {pos, size};
+    bool isOver = box.containsPoint(mousePos);
+
+    if (isOver != hovered) {
+      hovered = isOver;
+      onHoverChanged();
+    }
+    return isOver;
+  }
+
+  virtual void onHoverChanged() {
+    Log::logger->log(Log::TRACE, "[{}] Element::onHoverChanged", PLUGIN_NAME);
+  };
+
+  virtual bool onMouseClick(const Vector2D &mousePos) {
+    Vector2D elementPos = pos;
+    Element *p = parent;
+    while (p) {
+      elementPos = elementPos + p->pos;
+      p = p->parent;
+    }
+    CBox box = {elementPos.x, elementPos.y, size.x, size.y};
+    return box.containsPoint(mousePos);
   }
 
   Element *parent = nullptr;
@@ -122,6 +156,25 @@ public:
       return el->shouldBeRemoved();
     });
   }
+
+  bool onMouseMove(const Vector2D &mousePos) override {
+    bool anyChildHovered = false;
+    for (auto &el : elements) {
+      if (el->onMouseMove(mousePos)) {
+        anyChildHovered = true;
+      }
+    }
+    return anyChildHovered || Element::onMouseMove(mousePos);
+  }
+
+  bool onMouseClick(const Vector2D &mousePos) override {
+    for (auto it = elements.rbegin(); it != elements.rend(); ++it) {
+      if ((*it)->onMouseClick(mousePos)) {
+        return true;
+      }
+    }
+    return Element::onMouseClick(mousePos);
+  }
 };
 
 class WindowSnapshot : public Element {
@@ -162,12 +215,41 @@ public:
   void draw(const Vector2D &offset) override;
 };
 
+class Label : public Element {
+public:
+  std::string text;
+  CHyprColor color;
+  int fontsize;
+  SP<CTexture> texture = nullptr;
+  Label(std::string text, CHyprColor color, int fontsize) : text(text), color(color), fontsize(fontsize) {};
+  void draw(const Vector2D &offset) override;
+  void update(const double delta) override { Element::update(delta); }
+};
+
+class Button : public Element {
+public:
+  CHyprColor color;
+  std::function<void()> onClick;
+  UP<Label> label;
+
+  Button(CHyprColor col, std::function<void()> callback, UP<Label> label = nullptr);
+  void update(const double delta) override {
+    static auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
+    alpha.tick(delta, ANIMATIONSPEED);
+  }
+  void draw(const Vector2D &offset) override;
+
+  bool onMouseClick(const Vector2D &mousePos) override;
+  void onHoverChanged() override;
+};
+
 class WindowContainer : public Container {
 public:
   PHLWINDOW window;
   TextBox *header = nullptr;
   WindowSnapshot *snapshot = nullptr;
   BorderBox *border = nullptr;
+  Button *closeButton = nullptr;
 
   void updateAnimation(float delta) {
   }
@@ -181,4 +263,5 @@ public:
 
   void draw(const Vector2D &offset) override;
   void update(double delta) override;
+  bool onMouseClick(const Vector2D &mousePos) override;
 };

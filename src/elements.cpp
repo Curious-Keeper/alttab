@@ -1,9 +1,11 @@
 #include "../include/elements.hpp"
 #include "../include/defines.hpp"
 #include "../include/helpers.hpp"
-#define private public
-#include <hyprland/src/render/Renderer.hpp>
-#undef private
+#include "../include/manager.hpp"
+#include <src/Compositor.hpp>
+#include <src/helpers/time/Time.hpp>
+#include <src/managers/input/InputManager.hpp>
+#include <src/plugins/PluginAPI.hpp>
 
 void WindowSnapshot::update(const double delta) {
 }
@@ -40,11 +42,18 @@ void WindowSnapshot::snapshot() {
   }
 
   g_pHyprOpenGL->clear(CHyprColor{0, 0, 0, 1.0f});
+  g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
 
   double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
-
   auto root = window->wlSurface()->resource();
 
+  // request a new frame for all surfaces
+  root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
+    s->frame(Time::steadyNow());
+  },
+                     nullptr);
+
+  // render to fb
   root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
     if (!s->m_current.texture)
       return;
@@ -55,6 +64,7 @@ void WindowSnapshot::snapshot() {
   },
                      nullptr);
 
+  g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
   g_pHyprRenderer->endRender();
 
   // fade in
@@ -68,13 +78,12 @@ void WindowSnapshot::snapshot() {
 void WindowSnapshot::draw(const Vector2D &offset) {
   Log::logger->log(Log::TRACE, "[{}] WindowSnapshot::draw", PLUGIN_NAME);
   auto tex = fb.getTexture();
-  if (!tex) {
-    Log::logger->log(Log::ERR, "[{}] WindowSnapshot::draw, texture is NULL", PLUGIN_NAME);
-    return;
-  }
   CBox box = {pos, size};
   box.translate(offset);
-  g_pHyprOpenGL->renderTexture(tex, box, {.a = alphaAbs()});
+  if (!tex)
+    g_pHyprOpenGL->renderRect(box, CHyprColor{0, 0, 0, alphaAbs()}, {.round = 0});
+  else
+    g_pHyprOpenGL->renderTexture(tex, box, {.a = alphaAbs()});
 }
 
 void TextBox::update(const double delta) {
@@ -82,6 +91,7 @@ void TextBox::update(const double delta) {
   if (size.x <= 1 || size.y <= 1) {
     return;
   }
+  static auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
   if (window->m_title != lasttitle) {
     lasttitle = window->m_title;
     // 0.6 might be correct?
@@ -92,6 +102,7 @@ void TextBox::update(const double delta) {
 
 void TextBox::draw(const Vector2D &offset) {
   Log::logger->log(Log::TRACE, "[{}] TextBox::draw", PLUGIN_NAME);
+  static auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
   if (!FONTSIZE) {
     Log::logger->log(Log::ERR, "[{}] TextBox::draw, no font size", PLUGIN_NAME);
     return;
@@ -138,16 +149,56 @@ void WindowContainer::update(const double delta) {
 
   border->pos = Vector2D(0, 0);
   border->size = Vector2D(curSize.x, curSize.y);
+  /* Silly button for later.
+    // const auto pad = 4;
+    closeButton->size = {header->fontsize, header->fontsize};
+    // closeButton->size -= {pad * 2, pad * 2};
+    closeButton->pos = Vector2D((int)(curSize.x - (closeButton->size.x)), 0);
+    // closeButton->pos = Vector2D((int)(curSize.x - (closeButton->size.x + pad * 2)), 0);
+    //  closeButton->pos += {pad, pad};
+
+    closeButton->label->size = closeButton->size;
+    closeButton->label->pos = closeButton->pos;
+  */
+  // Log::logger->log(Log::TRACE, "[{}] WindowContainer::update, closeButton size: {}", PLUGIN_NAME, closeButton->size);
   Container::update(delta);
 }
 
 void WindowContainer::draw(const Vector2D &offset) {
   Log::logger->log(Log::TRACE, "[{}] WindowContainer::draw", PLUGIN_NAME);
+  static auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
   Container::draw(offset.round());
+#ifdef DEBUG
+  auto absolutePos = pos;
+  CBox debugBox = {absolutePos.x, absolutePos.y, size.x, size.y};
+  g_pHyprOpenGL->renderRect(debugBox, CHyprColor(1.0, 0.0, 0.0, 0.5), {});
+  auto debugTBox = CBox{absolutePos, {size.x, static_cast<double>(FONTSIZE) * 2}};
+  auto mousePos = g_pInputManager->getMouseCoordsInternal();
+  mousePos *= MONITOR->m_scale;
+  auto tex = g_pHyprOpenGL->renderText(std::format("x: {} y: {} w: {} h: {}\nx: {}, y: {}", absolutePos.x, absolutePos.y, size.x, size.y, mousePos.x, mousePos.y), CHyprColor(1.0, 1.0, 1.0, 1.0), FONTSIZE);
+  g_pHyprOpenGL->renderTexture(tex, debugTBox, {.a = 1.0f});
+#endif
 }
 
+bool WindowContainer::onMouseClick(const Vector2D &mousePos) {
+  if (Element::onMouseClick(mousePos)) {
+    if (!g_pCarouselManager) {
+      Log::logger->log(Log::ERR, "CarouselManager not initialized");
+      return false;
+    }
+    g_pCarouselManager->updateSelection(this);
+    return true;
+  }
+
+  return false;
+}
 WindowContainer::WindowContainer(PHLWINDOW window) : window(window) {
   Log::logger->log(Log::TRACE, "[{}] WindowContainer::WindowContainer", PLUGIN_NAME);
+  static auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
+  static auto BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
+  static auto BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
+  static auto BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
+
   header = add<TextBox>(window, TITLECOLOR, FONTSIZE);
   snapshot = add<WindowSnapshot>(window);
   border = add<BorderBox>(window, BORDERSIZE, BORDERROUNDING, BORDERROUNDINGPOWER);
@@ -161,7 +212,73 @@ void BorderBox::draw(const Vector2D &offset) {
     Log::logger->log(Log::ERR, "[{}] BorderBox::draw, invalid size: {}", PLUGIN_NAME, size);
     return;
   }
+  if (!PHANDLE)
+    return;
+  static auto ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
+  static auto INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
   auto box = CBox{offset, size}.round();
   g_pHyprOpenGL->renderBorder(box, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = rounding, .roundingPower = power, .borderSize = bordersize, .a = alphaAbs()});
 }
-void BorderBox::update(const double delta) { alpha.tick(delta, ANIMATIONSPEED); }
+void BorderBox::update(const double delta) {
+  static auto ANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
+  alpha.tick(delta, ANIMATIONSPEED);
+}
+
+void Label::draw(const Vector2D &offset) {
+  if (size.x <= 1 || size.y <= 1) {
+    Log::logger->log(Log::ERR, "[{}] Label::draw, invalid size: {}", PLUGIN_NAME, size);
+    return;
+  }
+
+  const auto pad = 1;
+  pos += offset;
+  // pos += {pad, pad};
+  // size -= {pad * 3, pad * 2};
+
+  if (!texture)
+    texture = g_pHyprOpenGL->renderText(text, color, fontsize, false, "", 1, 800);
+  if (!texture)
+    return;
+  g_pHyprOpenGL->renderTexture(texture, CBox{pos, size}, {});
+}
+
+void Button::draw(const Vector2D &offset) {
+  Log::logger->log(Log::TRACE, "[{}] Button::draw", PLUGIN_NAME);
+  Vector2D renderPos = pos + offset;
+  float drawAlpha = alphaAbs();
+
+  CHyprColor drawCol = hovered ? color : color;
+
+  if (size.x <= 1 || size.y <= 1) {
+    Log::logger->log(Log::ERR, "[{}] Button::draw, invalid size: {}", PLUGIN_NAME, size);
+    return;
+  }
+  CBox renderBox = {renderPos, size * scale.current};
+  g_pHyprOpenGL->renderRect(renderBox, drawCol, {.round = 2});
+  if (label) {
+    label->draw(offset);
+  }
+}
+
+bool Button::onMouseClick(const Vector2D &mousePos) {
+  if (Element::onMouseClick(mousePos) && onClick) {
+    onClick();
+    return true;
+  }
+  return false;
+}
+
+void Button::onHoverChanged() {
+  if (hovered) {
+    scale.target = 1.1f;
+    alpha.target = 1.0f;
+  } else {
+    scale.target = 1.0f;
+    alpha.target = 0.8f;
+  }
+}
+Button::Button(CHyprColor col, std::function<void()> callback, UP<Label> label) : color(col), onClick(callback), label(std::move(label)) {
+  if (label) {
+    label->setParent(this);
+  }
+}
