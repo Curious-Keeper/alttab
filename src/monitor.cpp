@@ -1,4 +1,6 @@
 #include "monitor.hpp"
+#include <src/Compositor.hpp>
+#include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/view/Window.hpp>
 #include <src/render/pass/RectPassElement.hpp>
 #include <src/render/pass/TexPassElement.hpp>
@@ -6,6 +8,8 @@
 #include <src/render/OpenGL.hpp>
 #include <src/render/Renderer.hpp>
 #undef private
+
+#include <src/protocols/PresentationTime.hpp>
 
 Monitor::Monitor(PHLMONITOR monitor) : monitor(monitor) {
   createTexture();
@@ -17,12 +21,12 @@ void Monitor::createTexture() {
   LOG_SCOPE()
   g_pHyprRenderer->makeEGLCurrent();
 
-  if (monitor->m_size.x <= 0 || monitor->m_size.y <= 0)
+  if (monitor->m_pixelSize.x <= 0 || monitor->m_pixelSize.y <= 0)
     return;
 
-  if (!bgFb.isAllocated() || bgFb.m_size != monitor->m_size)
-    bgFb.alloc(monitor->m_size.x, monitor->m_size.y, monitor->m_drmFormat);
-  CRegion fullRegion = CBox({0, 0}, monitor->m_size);
+  if (!bgFb.isAllocated() || bgFb.m_size != monitor->m_pixelSize)
+    bgFb.alloc(monitor->m_pixelSize.x, monitor->m_pixelSize.y, monitor->m_drmFormat);
+  CRegion fullRegion = CBox({0, 0}, monitor->m_pixelSize);
 
   g_pHyprRenderer->beginRender(monitor, fullRegion, RENDER_MODE_FULL_FAKE, nullptr, &bgFb, false);
   g_pHyprRenderer->renderWorkspace(monitor, monitor->m_activeWorkspace, NOW, fullRegion.getExtents());
@@ -31,13 +35,13 @@ void Monitor::createTexture() {
   g_pHyprRenderer->endRender();
   texture = bgFb.getTexture();
 
-  if (!blurFb.isAllocated() || blurFb.m_size != monitor->m_size / 2)
-    blurFb.alloc(monitor->m_size.x / 2, monitor->m_size.y / 2, monitor->m_drmFormat);
-  CRegion blurRegion = CBox({0, 0}, monitor->m_size);
+  if (!blurFb.isAllocated() || blurFb.m_size != monitor->m_pixelSize / 2)
+    blurFb.alloc(monitor->m_pixelSize.x / 2, monitor->m_pixelSize.y / 2, monitor->m_drmFormat);
+  CRegion blurRegion = CBox({0, 0}, monitor->m_pixelSize);
 
   g_pHyprRenderer->beginRender(monitor, blurRegion, RENDER_MODE_FULL_FAKE, nullptr, &blurFb, false);
 
-  CBox destBox = {{0, 0}, monitor->m_size / 2};
+  CBox destBox = {{0, 0}, monitor->m_pixelSize / 2};
   CTexPassElement::SRenderData data;
   data.tex = texture;
   data.box = destBox;
@@ -68,7 +72,7 @@ void Monitor::renderTexture(const CRegion &damage) {
   }
 
   auto dmg = damage;
-  const auto box = CBox{{0, 0}, monitor->m_size};
+  const auto box = CBox{{0, 0}, monitor->m_pixelSize};
   /* Need a better way to do this
     if (DIMENABLED)
     g_pHyprOpenGL->renderRect(dmg.getExtents(), {0, 0, 0, DIMAMOUNT}, {});
@@ -105,20 +109,16 @@ void Monitor::update(float delta, const bool active = false) {
   alpha.tick(delta, MONITORANIMATIONSPEED);
   bool damaged = rotation.done();
 
-  Vector2D cardSize = monitor->m_size * WINDOWSIZE;
+  const auto MONITOR = Desktop::focusState()->monitor();
+  Vector2D cardSize = (MONITOR->m_size * MONITOR->m_scale) * WINDOWSIZE;
   auto since = std::chrono::duration_cast<std::chrono::milliseconds>(NOW - lastFrame).count();
-  const auto refresh = [&](int idx, auto &w) {
-    w->needsRefresh = false;
-    w->snapshot(cardSize);
-    damaged = true;
-  };
-
   for (auto i = 0; i < windows.size(); ++i) {
     auto &w = windows[i];
+    bool hasNoTexture = !w->fb.m_fb || !w->ready;
     const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(NOW - w->lastCommit).count();
-    const auto th = activeWindow == w ? 1000 / 60 : 1000 / 30;
-    if (since >= th && w->needsRefresh) {
-      refresh(i, w);
+    const auto th = (activeWindow == i) ? 33 : 100;
+    if (hasNoTexture || (since >= th)) {
+      w->snapshot(cardSize);
     }
   }
   animating = damaged;
@@ -206,8 +206,12 @@ Monitor::CardData Monitor::getCardBox(int index, const float &offset = 0.0f, con
   if (aspect <= 0)
     aspect = 1.77f;
 
-  const float maxHeight = monitor->m_size.y * WINDOWSIZE;
-  const float maxWidth = monitor->m_size.x * (WINDOWSIZE * 1.5);
+  // Creates weird offsets if not using the currently active monitor
+  const auto MONITOR = Desktop::focusState()->monitor();
+  const auto mSize = MONITOR->m_size * MONITOR->m_scale;
+
+  const float maxHeight = mSize.y * WINDOWSIZE;
+  const float maxWidth = mSize.x * (WINDOWSIZE * 1.5);
 
   Vector2D baseSize;
   baseSize.y = maxHeight;
@@ -218,10 +222,10 @@ Monitor::CardData Monitor::getCardBox(int index, const float &offset = 0.0f, con
     baseSize.y = baseSize.x / aspect;
   }
 
-  const Vector2D center = {(monitor->m_size.x / 2.0f), (monitor->m_size.y / 2.0f) + offset};
+  const Vector2D center = {(mSize.x / 2.0f), (mSize.y / 2.0f) + offset};
   const int count = windows.size();
   // size of the spinnyboi
-  const float radius = (monitor->m_size.x * 0.5f) * CAROUSELSIZE;
+  const float radius = (MONITOR->m_size.x * 0.5f) * CAROUSELSIZE;
   const float stretchX = 1.4f;
 
   // viewport position
@@ -258,7 +262,6 @@ Monitor::CardData Monitor::getCardBox(int index, const float &offset = 0.0f, con
   pos.x = center.x + (radiusScale * stretchX) * std::cos(angle) - (size.x / 2.0f);
   pos.y = (center.y - tiltOffset) - (z * -tiltOffset) - (size.y / 2.0f);
 
-  LOG(ERR, "Mon {} Window {} pos.y: {}", monitor->m_id, index, pos.y);
   return {.box = CBox{pos, size}, .scale = s};
 }
 

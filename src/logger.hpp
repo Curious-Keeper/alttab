@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <src/debug/log/Logger.hpp>
+#include <src/desktop/DesktopTypes.hpp>
 
 class ScopeLogger {
 public:
@@ -34,6 +35,17 @@ private:
   Hyprutils::CLI::eLogLevel m_level;
   std::chrono::steady_clock::time_point m_start;
 };
+
+class DebugText {
+public:
+  void add(const std::string &text);
+  void draw(PHLMONITOR monitor);
+
+private:
+  std::string m_sBuffer;
+};
+
+inline UP<DebugText> Overlay = makeUnique<DebugText>();
 
 #ifndef NDEBUG
 #define LOG_SCOPE(...) ScopeLogger scope_log(__FUNCTION__ __VA_OPT__(, ) __VA_ARGS__);

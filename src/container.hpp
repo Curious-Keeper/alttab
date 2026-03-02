@@ -22,7 +22,6 @@ public:
 
   PHLWINDOW window;
   CFramebuffer fb;
-  bool needsRefresh = true;
   bool ready = false;
   Timestamp lastCommit;
   float z = 0.0f;
@@ -34,11 +33,8 @@ private:
   CBox previewBox;
   const double borderSize = 4;
   CGradientValueData borderColor;
-  GLuint fboID = 0;
   Vector2D lastSize;
-  CHyprSignalListener commitListener;
   std::string title;
   SP<CTexture> titleTexture;
-  bool initGL();
   double lastWidth = 0;
 };

@@ -7,20 +7,11 @@
 #include <src/render/Renderer.hpp>
 
 WindowCard::WindowCard(PHLWINDOW window) : window(window) {
-  commitListener = window->wlSurface()->resource()->m_events.commit.listen([this]() {
-    LOG_SCOPE();
-    this->needsRefresh = true;
-    this->ready = false;
-  });
   borderColor = CGradientValueData(Colors::YELLOW);
 }
 
 WindowCard::~WindowCard() {
-  commitListener.reset();
-  if (fboID) {
-    g_pHyprRenderer->makeEGLCurrent();
-    glDeleteFramebuffers(1, &fboID);
-  }
+  ;
 }
 
 void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.0f) {
@@ -57,27 +48,14 @@ void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.
   }
 #ifndef NDEBUG
   g_pHyprOpenGL->renderRect(contentBox, CHyprColor(1.0, 0.0, 0.0, 0.2), {});
+  auto text = g_pHyprOpenGL->renderText(std::format("Time: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(NOW - lastCommit).count()), CHyprColor(1.0, 1.0, 1.0, 1.0), 20);
+  g_pHyprOpenGL->renderTexture(text, {contentBox.pos(), text->m_size}, {.a = 1.0});
 #endif
 }
 
-bool WindowCard::initGL() {
-  if (fboID != 0)
-    return true;
-
-  g_pHyprRenderer->makeEGLCurrent();
-  glGenFramebuffers(1, &fboID);
-
-  return fboID != 0;
-}
-
 void WindowCard::snapshot(const Vector2D &targetSize) {
-  LOG_SCOPE(Log::ERR)
   if (!window || !window->wlSurface() || !window->wlSurface()->resource()) {
     LOG(ERR, "No window or surface");
-    return;
-  }
-  if (!initGL()) {
-    LOG(ERR, "Failed to initGL");
     return;
   }
   if (targetSize.x <= 1 || targetSize.y <= 1) {
@@ -85,53 +63,52 @@ void WindowCard::snapshot(const Vector2D &targetSize) {
     return;
   }
 
-  g_pHyprRenderer->makeEGLCurrent();
-  LOG(ERR, "snapshot: ({}) {} {}", window->m_title, targetSize.x, targetSize.y);
-
-  const auto MON = Desktop::focusState()->monitor();
-  bool isEmpty = (fb.m_size.x == 0 || fb.m_size.y == 0);
-  bool sizeChanged = std::abs(targetSize.x - fb.m_size.x) > 2 || std::abs(targetSize.y - fb.m_size.y) > 2;
-
-  if (isEmpty || sizeChanged) {
-    fb.alloc(targetSize.x, targetSize.y, MON->m_drmFormat);
-  }
-
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, fboID);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb.m_fb);
-
-  glClearColor(0, 0, 0, 0);
-  glClear(GL_COLOR_BUFFER_BIT);
-
-  const auto surface = window->wlSurface()->getSurfaceBoxGlobal().value_or(CBox{0, 0, 0, 0}).size();
-  if (surface.x <= 0 || surface.y <= 0)
+  if (targetSize.x <= 1 || targetSize.y <= 1)
     return;
 
-  const auto scale = fb.m_size / surface;
+  auto surfaceSize = window->wlSurface()->getSurfaceBoxGlobal().value_or({0, 0, 0, 0}).size();
+  if (surfaceSize.x < 1.0 || surfaceSize.y < 1.0) {
+    Log::logger->log(Log::ERR, "[{}] WindowSnapshot::update, invalid surface size: {}", PLUGIN_NAME, surfaceSize);
+    return;
+  }
 
-  window->wlSurface()->resource()->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
-    auto &tex = s->m_current.texture;
-    if (!tex || tex->m_texID == 0 || s->m_current.scale <= 0)
+  const auto MONITOR = Desktop::focusState()->monitor();
+  if (targetSize.x > 0 && targetSize.y > 0) {
+    if (targetSize > fb.m_size) {
+      fb.alloc(targetSize.x, targetSize.y, MONITOR->m_output->state->state().drmFormat);
+    }
+  }
+
+  g_pHyprRenderer->makeEGLCurrent();
+
+  CRegion fbBox = CBox{{0, 0}, targetSize};
+  if (!g_pHyprRenderer->beginRender(MONITOR, fbBox, RENDER_MODE_FULL_FAKE, nullptr, &fb)) {
+    return;
+  }
+
+  g_pHyprOpenGL->clear(CHyprColor{0, 0, 0, 1.0f});
+  g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
+
+  double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
+  auto root = window->wlSurface()->resource();
+
+  root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
+    s->frame(Time::steadyNow());
+  },
+                     nullptr);
+
+  root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
+    if (!s->m_current.texture)
       return;
 
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex->m_texID, 0);
-
-    const auto logical = tex->m_size / s->m_current.scale;
-    const auto dst1 = offset * scale;
-    const auto dst2 = dst1 + (logical * scale);
-
-    glBlitFramebuffer(0, 0, tex->m_size.x, tex->m_size.y,
-                      dst1.x, dst1.y, dst2.x, dst2.y,
-                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    auto box = s->extends();
+    box.scale(scale).translate(offset * scale);
+    g_pHyprOpenGL->renderTexture(s->m_current.texture, box, {.a = 1.0f});
   },
-                                                nullptr);
+                     nullptr);
 
-  glBindTexture(GL_TEXTURE_2D, fb.getTexture()->m_texID);
-  glGenerateMipmap(GL_TEXTURE_2D);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 4.0f);
-  glBindTexture(GL_TEXTURE_2D, 0);
-
+  g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
+  g_pHyprRenderer->endRender();
   lastCommit = NOW;
   ready = true;
 }
@@ -162,5 +139,5 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 
 void WindowCard::drawBorder(const float alpha) {
   LOG(ERR, "borderpass: ({}), alpha: {}", window->m_title, alpha);
-  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = sc<int>(BORDERROUNDING), .roundingPower = sc<float>(BORDERROUNDINGPOWER), .borderSize = sc<int>(BORDERSIZE), .a = alpha});
+  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = BORDERROUNDING, .roundingPower = BORDERROUNDINGPOWER, .borderSize = BORDERSIZE, .a = alpha});
 }

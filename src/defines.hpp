@@ -19,7 +19,7 @@ inline bool BRINGTOACTIVE = true;
 inline int FONTSIZE = 24;
 inline int BORDERSIZE = 1;
 inline int BORDERROUNDING = 0;
-inline int BORDERROUNDINGPOWER = 2;
+inline float BORDERROUNDINGPOWER = 2;
 
 inline CGradientValueData *ACTIVEBORDERCOLOR = nullptr;
 inline CGradientValueData *INACTIVEBORDERCOLOR = nullptr;

@@ -118,9 +118,9 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
 
   if (monid == cur->m_id) {
 #ifndef NDEBUG
-    auto textbox = g_pHyprOpenGL->renderText(std::format("ActiveInternal: {}, ActiveInFocus: {}, monid: {}", activeMonitor, cur->m_name, monid), CHyprColor(1.0, 1.0, 1.0, 1.0), 20);
-    g_pHyprOpenGL->renderTexture(textbox, {{0, 0}, textbox->m_size}, {});
+    Overlay->add(std::format("ActiveInternal: {}, ActiveInFocus: {}, monid: {}", activeMonitor, cur->m_name, monid));
 #endif
+
     if (!SPLITMONITOR) {
       monitors[monid]->draw(damage, 0, true);
     } else {
@@ -147,8 +147,12 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
       }
       float activeOffset = (activeMon - monitorOffset.current) * spacing;
       monitors[activeMonitor]->draw(damage, activeOffset, true);
+#ifndef NDEBUG
+      Overlay->add(std::format("monitor->m_size.x: {}, monitor->m_size.y: {}\nmonitor->m_pixelSize.x: {}, monitor->m_pixelSize.y: {}", monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y, monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y));
+#endif
     }
   }
+  Overlay->draw(cur);
 }
 
 void Manager::onConfigReload() {
