@@ -1,5 +1,6 @@
 #pragma once
 #include "logger.hpp"
+#include <src/config/ConfigDataValues.hpp>
 #include <src/desktop/DesktopTypes.hpp>
 #include <src/event/EventBus.hpp>
 #include <src/helpers/Color.hpp>
@@ -13,6 +14,15 @@ inline bool DIMENABLED = true;
 inline bool BLURBG = true;
 inline bool POWERSAVE = true;
 inline bool INCLUDESPECIAL = true;
+inline bool BRINGTOACTIVE = true;
+
+inline int FONTSIZE = 24;
+inline int BORDERSIZE = 1;
+inline int BORDERROUNDING = 0;
+inline int BORDERROUNDINGPOWER = 2;
+
+inline CGradientValueData *ACTIVEBORDERCOLOR = nullptr;
+inline CGradientValueData *INACTIVEBORDERCOLOR = nullptr;
 
 inline float CAROUSELSIZE = 0.5f;
 inline float WINDOWSIZE = 0.3f;
@@ -21,8 +31,11 @@ inline float WINDOWSIZEINACTIVE = 0.7f;
 inline float WARP = 0.20f;
 inline float TILT = 10.0f;
 inline float DIMAMOUNT = 0.3f;
-inline float UNFOCUSEDALPHA = 0.5f;
+inline float UNFOCUSEDALPHA = 0.6f;
 inline float ROTATIONSPEED = 1.0f;
+inline bool SPLITMONITOR = true;
+inline float MONITORSPACING = 0.3f;
+inline float MONITORANIMATIONSPEED = 0.4f;
 
 using Timestamp = std::chrono::steady_clock::time_point;
 using DeltaTime = std::chrono::duration<long long, std::nano>;

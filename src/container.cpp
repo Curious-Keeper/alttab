@@ -71,12 +71,19 @@ bool WindowCard::initGL() {
 }
 
 void WindowCard::snapshot(const Vector2D &targetSize) {
-  if (!window || !window->wlSurface() || !window->wlSurface()->resource())
+  LOG_SCOPE(Log::ERR)
+  if (!window || !window->wlSurface() || !window->wlSurface()->resource()) {
+    LOG(ERR, "No window or surface");
     return;
-  if (!initGL())
+  }
+  if (!initGL()) {
+    LOG(ERR, "Failed to initGL");
     return;
-  if (targetSize.x <= 1 || targetSize.y <= 1)
+  }
+  if (targetSize.x <= 1 || targetSize.y <= 1) {
+    LOG(ERR, "targetSize.x ({}) <= 1 || targetSize.y ({}) <= 1", targetSize.x, targetSize.y);
     return;
+  }
 
   g_pHyprRenderer->makeEGLCurrent();
   LOG(ERR, "snapshot: ({}) {} {}", window->m_title, targetSize.x, targetSize.y);
@@ -155,10 +162,5 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 
 void WindowCard::drawBorder(const float alpha) {
   LOG(ERR, "borderpass: ({}), alpha: {}", window->m_title, alpha);
-  const auto BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
-  const auto BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
-  const auto BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
-  const auto ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
-  const auto INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
   g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = sc<int>(BORDERROUNDING), .roundingPower = sc<float>(BORDERROUNDINGPOWER), .borderSize = sc<int>(BORDERSIZE), .a = alpha});
 }

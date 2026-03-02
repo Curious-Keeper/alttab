@@ -177,7 +177,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:animation_speed", Hyprlang::FLOAT{ROTATIONSPEED});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{0.6});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:include_special", Hyprlang::INT{1});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur", Hyprlang::INT{BLURBG});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
@@ -190,6 +190,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_inactive", Hyprlang::FLOAT{WINDOWSIZEINACTIVE});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:warp", Hyprlang::FLOAT{WARP});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:tilt", Hyprlang::FLOAT{TILT});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:bring_to_active", Hyprlang::INT{BRINGTOACTIVE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:split_monitor", Hyprlang::INT{SPLITMONITOR});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::FLOAT{MONITORSPACING});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_animation_speed", Hyprlang::FLOAT{MONITORANIMATIONSPEED});
 
   try {
     auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");

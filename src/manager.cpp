@@ -1,4 +1,5 @@
 #include "manager.hpp"
+#include "defines.hpp"
 #include <hyprutils/math/Vector2D.hpp>
 #include <src/Compositor.hpp>
 #include <src/desktop/state/FocusState.hpp>
@@ -11,279 +12,6 @@
 #include <src/render/OpenGL.hpp>
 #include <src/render/Renderer.hpp>
 #undef private
-
-Monitor::Monitor(PHLMONITOR monitor) : monitor(monitor) {
-  createTexture();
-  activeWindow = 0;
-  rotation.snap(M_PI / 2.0f);
-  animating = false;
-}
-void Monitor::createTexture() {
-  g_pHyprRenderer->makeEGLCurrent();
-
-  if (!bgFb.isAllocated() || bgFb.m_size != monitor->m_size)
-    bgFb.alloc(monitor->m_size.x, monitor->m_size.y, monitor->m_drmFormat);
-  CRegion fullRegion = CBox({0, 0}, monitor->m_size);
-
-  g_pHyprRenderer->beginRender(monitor, fullRegion, RENDER_MODE_FULL_FAKE, nullptr, &bgFb, false);
-  g_pHyprRenderer->renderWorkspace(monitor, monitor->m_activeWorkspace, NOW, fullRegion.getExtents());
-  g_pHyprRenderer->m_renderPass.render(fullRegion);
-  g_pHyprRenderer->m_renderPass.clear();
-  g_pHyprRenderer->endRender();
-  texture = bgFb.getTexture();
-
-  if (!blurFb.isAllocated() || blurFb.m_size != monitor->m_size / 2)
-    blurFb.alloc(monitor->m_size.x / 2, monitor->m_size.y / 2, monitor->m_drmFormat);
-  CRegion blurRegion = CBox({0, 0}, monitor->m_size);
-
-  g_pHyprRenderer->beginRender(monitor, blurRegion, RENDER_MODE_FULL_FAKE, nullptr, &blurFb, false);
-
-  CBox destBox = {{0, 0}, monitor->m_size / 2};
-  CTexPassElement::SRenderData data;
-  data.tex = texture;
-  data.box = destBox;
-  data.blur = true;
-  g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(data));
-  CRectPassElement::SRectData blur;
-  blur.box = destBox;
-  blur.color = {0.0, 0.0, 0.0, 0.0};
-  blur.blur = true;
-  g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(blur));
-
-#ifndef NDEBUG
-  CRectPassElement::SRectData debug;
-  debug.box = destBox;
-  debug.color = {0.0, 0.0, 1.0, 0.5};
-  g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(debug));
-#endif
-  g_pHyprRenderer->m_renderPass.render(blurRegion);
-  g_pHyprRenderer->m_renderPass.clear();
-  g_pHyprRenderer->endRender();
-  blurred = blurFb.getTexture();
-}
-
-void Monitor::renderTexture(const CRegion &damage) {
-  if (!blurred || !texture) {
-    throw std::runtime_error("No blurred or texture");
-    return;
-  }
-
-  auto dmg = damage;
-  const auto box = CBox{{0, 0}, monitor->m_size};
-  /* Need a better way to do this
-    if (DIMENABLED)
-    g_pHyprOpenGL->renderRect(dmg.getExtents(), {0, 0, 0, DIMAMOUNT}, {});
-  */
-  if (BLURBG)
-    g_pHyprOpenGL->renderTexture(blurred, box, {.damage = &dmg});
-  else if (POWERSAVE)
-    g_pHyprOpenGL->renderTexture(texture, box, {.damage = &dmg});
-}
-
-WP<WindowCard> Monitor::addWindow(PHLWINDOW window) {
-  auto w = makeUnique<WindowCard>(window);
-  windows.emplace_back(std::move(w));
-  return windows.back();
-}
-size_t Monitor::removeWindow(PHLWINDOW window) {
-  std::erase_if(windows, [&](const auto &card) {
-    return card->window == window;
-  });
-  return windows.size();
-}
-void Monitor::next() {
-  windows[activeWindow]->isActive = false;
-  select(activeWindow + 1);
-  windows[activeWindow]->isActive = true;
-}
-void Monitor::prev() {
-  windows[activeWindow]->isActive = false;
-  select(activeWindow - 1);
-  windows[activeWindow]->isActive = true;
-}
-void Monitor::update(float delta) {
-  // LOG_SCOPE(Log::ERR)
-  rotation.tick(delta, ROTATIONSPEED);
-  bool damaged = rotation.done();
-
-  static Vector2D cardSize = monitor->m_size * 0.4f;
-  auto since = std::chrono::duration_cast<std::chrono::milliseconds>(NOW - lastFrame).count();
-  const auto refresh = [&](int idx, auto &w) {
-    w->needsRefresh = false;
-    w->snapshot(cardSize);
-    monitor->addDamage(getCardBox(idx).box);
-    damaged = true;
-  };
-
-  for (auto i = 0; i < windows.size(); ++i) {
-    auto &w = windows[i];
-    const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(NOW - w->lastCommit).count();
-    const auto th = activeWindow == w ? 1000 / 60 : 1000 / 30;
-    if (since >= th && w->needsRefresh) {
-      refresh(i, w);
-    }
-  }
-  animating = damaged;
-}
-
-void Monitor::draw(const CRegion &damage) {
-  LOG(ERR, "dim: {}, dimamount: {}, blur: {}", DIMENABLED, DIMAMOUNT, BLURBG);
-
-  auto dmg = damage;
-  if (!POWERSAVE) {
-    g_pHyprOpenGL->renderRect(dmg.getExtents(), CHyprColor(0.0, 0.0, 0.0, (DIMENABLED) ? DIMAMOUNT : 0), {.blur = sc<bool>(BLURBG)});
-  } else {
-    renderTexture(damage);
-  }
-
-  const int count = windows.size();
-  if (count == 0)
-    return;
-
-  struct RenderTask {
-    WindowCard *card;
-    CardData data;
-  };
-  std::vector<RenderTask> tasks;
-
-  // Alphablend the cards
-  static float agressiveness = 1.0f;
-  static float minAlpha = UNFOCUSEDALPHA * agressiveness;
-  static float zoneWidth = 1.25f * agressiveness;
-  for (int i = 0; i < count; ++i) {
-    auto data = getCardBox(i);
-    float angle = ((2.0f * M_PI * i) / count) + rotation.current;
-    float z = std::sin(angle);
-
-    float normAngle = fmod(angle, 2.0f * M_PI);
-    if (normAngle < 0)
-      normAngle += 2.0f * M_PI;
-    float dist = std::abs(normAngle - (M_PI / 2.0f));
-    if (dist > M_PI)
-      dist = (2.0f * M_PI) - dist;
-
-    float alphaWeight = std::max(0.0f, (float)(1.0f - (dist / (M_PI / zoneWidth))));
-    float smoothAlpha = std::pow(alphaWeight, 2.0f);
-
-    float backAlpha = minAlpha + (z + 1.0f) * 0.15f;
-    float alpha = std::lerp(backAlpha, 1.0f, smoothAlpha);
-
-    float exaggeratedZ = z + (smoothAlpha * 0.1f);
-    data.alpha = alpha;
-    data.z = exaggeratedZ;
-    tasks.push_back({windows[i].get(), data});
-  }
-  std::sort(tasks.begin(), tasks.end(), [](const auto &a, const auto &b) {
-    float weightA = a.data.z + (a.data.alpha * 0.01f);
-    float weightB = b.data.z + (b.data.alpha * 0.01f);
-
-    if (std::abs(weightA - weightB) < 0.0001f)
-      return a.card < b.card;
-    return weightA < weightB;
-  });
-
-  for (const auto &task : tasks) {
-    CRegion cardDmg = task.data.box;
-    cardDmg.intersect(damage);
-    if (cardDmg.empty())
-      continue;
-    task.card->draw(task.data.box, task.data.scale, task.data.alpha);
-    dmg.add(cardDmg);
-  }
-  if (animating || !rotation.done()) {
-    if (POWERSAVE)
-      monitor->addDamage(dmg);
-    else
-      g_pHyprRenderer->damageMonitor(monitor);
-  }
-}
-
-Monitor::CardData Monitor::getCardBox(int index) {
-  if (index < 0 || index >= (int)windows.size())
-    return {};
-
-  const auto w = windows[index]->window;
-  if (!w)
-    return {};
-
-  auto surface = w->wlSurface()->getSurfaceBoxGlobal().value_or(CBox{0, 0, 0, 0}).size();
-  float aspect = (float)surface.x / std::max(1.0f, (float)surface.y);
-  if (aspect <= 0)
-    aspect = 1.77f;
-
-  const float maxHeight = monitor->m_size.y * WINDOWSIZE;
-  const float maxWidth = monitor->m_size.x * (WINDOWSIZE * 1.5);
-
-  Vector2D baseSize;
-  baseSize.y = maxHeight;
-  baseSize.x = baseSize.y * aspect;
-
-  if (baseSize.x > maxWidth) {
-    baseSize.x = maxWidth;
-    baseSize.y = baseSize.x / aspect;
-  }
-
-  const Vector2D center = monitor->m_size / 2.0f;
-  const int count = windows.size();
-  // size of the spinnyboi
-  const float radius = (monitor->m_size.x * 0.5f) * CAROUSELSIZE;
-  const float stretchX = 1.4f;
-
-  // viewport position
-  float baseAngle = ((2.0f * M_PI * index) / count) + rotation.current;
-  float warpScale = WARP + (1.0f - WINDOWSIZEINACTIVE) * 0.2f;
-  float angle = baseAngle - warpScale * std::sin(2.0f * baseAngle);
-  float z = std::sin(angle);
-
-  // clamp to [0, 2PI] so we don't spin out of control (even though it looks very funny)
-  float normAngle = fmod(angle, 2.0f * M_PI);
-  if (normAngle < 0)
-    normAngle += 2.0f * M_PI;
-
-  float dist = std::abs(normAngle - (M_PI / 2.0f));
-  if (dist > M_PI)
-    dist = (2.0f * M_PI) - dist;
-
-  // scale focused so it stands out abit
-  float focusWeight = std::max(0.0, (double)(1.0f - (dist / (M_PI / 2.0f))));
-  float focusFactor = std::pow(focusWeight, 2.5);
-  float depthFalloff = std::lerp(WINDOWSIZEINACTIVE, 1.0f, (z + 1.0f) / 2.0f);
-  float zoom = std::lerp(1.0f, WINDOWSIZEACTIVE, focusFactor);
-
-  float s = depthFalloff * zoom;
-  s = std::max(s, 0.01f);
-  Vector2D size = baseSize * s;
-
-  float radiusScale = radius * std::lerp(0.85f, 1.0f, (z + 1.0f) / 2.0f);
-  float tiltRadian = TILT * (M_PI / 180.0f);
-  float tiltOffset = radius * std::sin(tiltRadian);
-
-  Vector2D pos;
-  pos.x = center.x + (radiusScale * stretchX) * std::cos(angle) - (size.x / 2.0f);
-  pos.y = (center.y - tiltOffset) - (z * -tiltOffset) - (size.y / 2.0f);
-
-  return {.box = CBox{pos, size}, .scale = s};
-}
-
-void Monitor::select(int index) {
-  const int count = windows.size();
-  if (count <= 0)
-    return;
-
-  activeWindow = (index + count) % count;
-
-  float angle = (M_PI / 2.0f) - ((2.0f * M_PI * activeWindow) / count);
-  float diff = angle - rotation.target;
-
-  while (diff > M_PI)
-    diff -= 2.0f * M_PI;
-  while (diff < -M_PI)
-    diff += 2.0f * M_PI;
-
-  rotation.set(rotation.target + diff, false);
-
-  animating = true;
-}
 
 Manager::Manager() {
   LOG_SCOPE()
@@ -338,23 +66,34 @@ void Manager::toggle() {
 }
 
 void Manager::confirm() {
-  Desktop::focusState()->fullWindowFocus(monitors[activeMonitor]->windows[monitors[activeMonitor]->activeWindow]->window, Desktop::FOCUS_REASON_KEYBIND);
+  const auto &mon = monitors[activeMonitor];
+  if (!mon || mon->windows.empty()) {
+    deactivate();
+    return;
+  }
+  auto selected = mon->windows[mon->activeWindow]->window;
+  if (BRINGTOACTIVE)
+    g_pKeybindManager->m_dispatchers["focusworkspaceoncurrentmonitor"](selected->m_workspace->m_name);
+  Desktop::focusState()->fullWindowFocus(selected, Desktop::FOCUS_REASON_KEYBIND);
   deactivate();
 }
 
 void Manager::update(float delta) {
   LOG_SCOPE()
+  monitorOffset.tick(delta, MONITORANIMATIONSPEED);
   for (const auto &[id, m] : monitors) {
-    m->update(delta);
+    m->update(delta, id == activeMonitor);
   }
 }
 
 void Manager::up() {
   activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
+  monitorOffset.set(activeMonitor, false);
 }
 
 void Manager::down() {
   activeMonitor = (activeMonitor + 1) % monitors.size();
+  monitorOffset.set(activeMonitor, false);
 }
 
 void Manager::next() {
@@ -368,14 +107,59 @@ void Manager::prev() {
 void Manager::draw(MONITORID monid, const CRegion &damage) {
   LOG_SCOPE()
   const auto cur = Desktop::focusState()->monitor();
-  if (monid == cur->m_id)
-    monitors[monid]->draw(damage);
-  else {
-    monitors[monid]->renderTexture(damage);
+  auto dmg = damage;
+
+  if (!POWERSAVE) {
+    g_pHyprOpenGL->renderRect(dmg.getExtents(), CHyprColor(0.0, 0.0, 0.0, (DIMENABLED) ? DIMAMOUNT : 0), {.blur = sc<bool>(BLURBG)});
+  } else {
+    if (monitors.contains(monid))
+      monitors[monid]->renderTexture(damage);
+  }
+
+  if (monid == cur->m_id) {
+#ifndef NDEBUG
+    auto textbox = g_pHyprOpenGL->renderText(std::format("ActiveInternal: {}, ActiveInFocus: {}, monid: {}", activeMonitor, cur->m_name, monid), CHyprColor(1.0, 1.0, 1.0, 1.0), 20);
+    g_pHyprOpenGL->renderTexture(textbox, {{0, 0}, textbox->m_size}, {});
+#endif
+    if (!SPLITMONITOR) {
+      monitors[monid]->draw(damage, 0, true);
+    } else {
+      const auto spacing = cur->m_size.y * MONITORSPACING;
+      int i = 0;
+      for (const auto &[id, mon] : monitors) {
+        if (id == activeMonitor) {
+          i++;
+          continue;
+        }
+
+        float offset = (i - monitorOffset.current) * spacing;
+        mon->draw(damage, offset, false);
+        i++;
+      }
+      int activeMon = 0;
+      int counter = 0;
+      for (const auto &[id, mon] : monitors) {
+        if (id == activeMonitor) {
+          activeMon = counter;
+          break;
+        }
+        counter++;
+      }
+      float activeOffset = (activeMon - monitorOffset.current) * spacing;
+      monitors[activeMonitor]->draw(damage, activeOffset, true);
+    }
   }
 }
 
 void Manager::onConfigReload() {
+  FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
+  BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
+  BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
+  BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
+
+  ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
+  INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
+
   DIMENABLED = *CConfigValue<Hyprlang::INT>("plugin:alttab:dim");
   DIMAMOUNT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:dim_amount");
   BLURBG = *CConfigValue<Hyprlang::INT>("plugin:alttab:blur");
@@ -388,6 +172,10 @@ void Manager::onConfigReload() {
   TILT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:tilt");
   WINDOWSIZEACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_active");
   WINDOWSIZEINACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
+  MONITORSPACING = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_spacing");
+  MONITORANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_animation_speed");
+  SPLITMONITOR = *CConfigValue<Hyprlang::INT>("plugin:alttab:split_monitor");
+  UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
 }
 
 void Manager::onWindowCreated(PHLWINDOW window) {
@@ -444,19 +232,21 @@ void Manager::rebuild() {
   const auto INCLUDESPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
 
   for (const auto &m : g_pCompositor->m_monitors) {
-    if (!m->m_enabled)
+    if (!m->m_enabled || m->m_isUnsafeFallback)
       continue;
     monitors[m->m_id] = makeUnique<Monitor>(m);
   }
 
   auto activeWindow = Desktop::focusState()->window();
+  activeMonitor = Desktop::focusState()->monitor()->m_id;
+  monitorOffset.snap(activeMonitor);
 
   for (auto &[monID, mon] : monitors) {
     std::vector<PHLWINDOW> monitorWindows;
     for (const auto &w : g_pCompositor->m_windows) {
       if (!INCLUDESPECIAL && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
         continue;
-      if (w->m_isMapped && w->m_monitor.lock())
+      if (w->m_isMapped && w->m_monitor.lock() && (!SPLITMONITOR || w->m_monitor == mon->monitor))
         monitorWindows.emplace_back(w);
     }
 
