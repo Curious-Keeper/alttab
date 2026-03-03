@@ -108,12 +108,14 @@ void Monitor::update(float delta, const bool active = false) {
   alpha.set(active ? 1.0f : 0.0f, false);
   alpha.tick(delta, MONITORANIMATIONSPEED);
   bool damaged = (!rotation.done() || !zoom.done() || !alpha.done());
+  Overlay->add(std::format("Monitor::update, damaged: {}, active: {}, rotation.done: {}, zoom.done: {}, alpha.done: {}", damaged, active, rotation.done(), zoom.done(), alpha.done()));
 
   const auto MONITOR = Desktop::focusState()->monitor();
   Vector2D cardSize = (MONITOR->m_size * MONITOR->m_scale) * WINDOWSIZE;
   int snapshotsThisFrame = 0;
   const int MAX_SNAPSHOTS_PER_FRAME = 3;
   for (auto &w : windows) {
+    w->requestFrame(monitor);
     if (!w->ready && snapshotsThisFrame < MAX_SNAPSHOTS_PER_FRAME) {
       damaged |= w->snapshot(cardSize);
       snapshotsThisFrame++;
@@ -184,12 +186,6 @@ void Monitor::draw(const CRegion &damage, const float &offset = 0.0f, const bool
   if (!dmg.empty())
     g_pHyprOpenGL->renderRect(dmg.getExtents(), {0.5, 0.5, 0.0, 0.5}, {});
 #endif
-  if (animating) {
-    if (POWERSAVE)
-      monitor->addDamage(dmg);
-    else
-      g_pHyprRenderer->damageMonitor(monitor);
-  }
 }
 
 Monitor::CardData Monitor::getCardBox(int index, const float &offset = 0.0f, const bool active = false) {

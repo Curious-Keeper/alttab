@@ -1,11 +1,15 @@
 #include "manager.hpp"
 #include "defines.hpp"
+#include <aquamarine/output/Output.hpp>
+#include <chrono>
 #include <hyprutils/math/Vector2D.hpp>
 #include <src/Compositor.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/helpers/Color.hpp>
 #include <src/helpers/Monitor.hpp>
+#include <src/managers/eventLoop/EventLoopManager.hpp>
 #include <src/plugins/PluginAPI.hpp>
+#include <src/protocols/PresentationTime.hpp>
 #include <src/render/pass/RectPassElement.hpp>
 #include <src/render/pass/TexPassElement.hpp>
 #define private public
@@ -45,11 +49,24 @@ Manager::Manager() {
   lastFrame = lastUpdate = NOW;
 }
 
+void Manager::damageMonitors() {
+  for (auto &[id, mon] : monitors) {
+    g_pHyprRenderer->damageMonitor(mon->monitor);
+  }
+}
+
 void Manager::activate() {
   LOG_SCOPE()
   active = true;
   activeMonitor = Desktop::focusState()->monitor()->m_id;
   rebuild();
+  loopTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(10), [this](SP<CEventLoopTimer> timer, void *data) {
+    auto d = FloatTime(NOW - lastFrame).count();
+    auto min = std::min(d, (monitors[activeMonitor]->monitor->m_refreshRate * 2) / 1000);
+    update(min);
+    lastFrame = NOW;
+    loopTimer->updateTimeout(std::chrono::milliseconds(16)); }, nullptr);
+  g_pEventLoopManager->addTimer(loopTimer);
 }
 
 void Manager::deactivate() {
@@ -58,6 +75,7 @@ void Manager::deactivate() {
   for (const auto &[id, mon] : monitors) {
     g_pHyprRenderer->damageMonitor(mon->monitor);
   }
+  loopTimer.reset();
 }
 
 void Manager::toggle() {
@@ -85,32 +103,33 @@ void Manager::confirm() {
 
 void Manager::update(float delta) {
   LOG_SCOPE()
+  const auto MONITOR = Desktop::focusState()->monitor();
   monitorOffset.tick(delta, MONITORANIMATIONSPEED);
   for (const auto &[id, m] : monitors) {
     m->update(delta, id == activeMonitor);
+    if (m->animating || !monitorOffset.done()) {
+      // God i'm stupid sometimes. Ofc only damage the active monitor or animations will be fucked.
+      g_pHyprRenderer->damageMonitor(MONITOR);
+    }
   }
 }
 
 void Manager::up() {
   activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
   monitorOffset.set(activeMonitor, false);
-  g_pCompositor->scheduleFrameForMonitor(monitors[activeMonitor]->monitor);
 }
 
 void Manager::down() {
   activeMonitor = (activeMonitor + 1) % monitors.size();
   monitorOffset.set(activeMonitor, false);
-  g_pCompositor->scheduleFrameForMonitor(monitors[activeMonitor]->monitor);
 }
 
 void Manager::next() {
   monitors[activeMonitor]->next();
-  g_pCompositor->scheduleFrameForMonitor(monitors[activeMonitor]->monitor);
 }
 
 void Manager::prev() {
   monitors[activeMonitor]->prev();
-  g_pCompositor->scheduleFrameForMonitor(monitors[activeMonitor]->monitor);
 }
 
 void Manager::draw(MONITORID monid, const CRegion &damage) {
@@ -160,8 +179,6 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
       Overlay->add(std::format("monitor->m_size.x: {}, monitor->m_size.y: {}\nmonitor->m_pixelSize.x: {}, monitor->m_pixelSize.y: {}", monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y, monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y));
 #endif
     }
-    if (monitors[activeMonitor]->animating)
-      g_pCompositor->scheduleFrameForMonitor(monitors[activeMonitor]->monitor);
   }
 
 #ifndef NDEBUG
@@ -194,6 +211,7 @@ void Manager::onConfigReload() {
   MONITORANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_animation_speed");
   SPLITMONITOR = *CConfigValue<Hyprlang::INT>("plugin:alttab:split_monitor");
   UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
+  POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
 }
 
 void Manager::onWindowCreated(PHLWINDOW window) {
@@ -227,10 +245,9 @@ void Manager::onRender(eRenderStage stage) {
 
   static bool redraw = false;
   switch (stage) {
-  case eRenderStage::RENDER_PRE:
-    update(FloatTime(NOW - lastFrame).count());
-    lastFrame = NOW;
-    break;
+  case eRenderStage::RENDER_PRE: {
+
+  } break;
   case eRenderStage::RENDER_LAST_MOMENT:
     g_pHyprRenderer->m_renderPass.add(makeUnique<RenderPass>());
     break;

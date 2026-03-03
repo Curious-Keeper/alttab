@@ -4,28 +4,34 @@
 #include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/view/Window.hpp>
 #include <src/helpers/Color.hpp>
+#include <src/protocols/PresentationTime.hpp>
 #include <src/render/Renderer.hpp>
 
 WindowCard::WindowCard(PHLWINDOW window) : window(window) {
   commit = window->wlSurface()->resource()->m_events.commit.listen([this] {
-    needsSnapshot = true;
     ready = false;
     lastCommit = NOW;
   });
-  borderColor = CGradientValueData(Colors::YELLOW);
 }
 
 WindowCard::~WindowCard() {
   ;
 }
 
+void WindowCard::requestFrame(PHLMONITOR monitor) {
+  window->wlSurface()->resource()->frame(NOW);
+  auto FEEDBACK = makeUnique<CQueuedPresentationData>(window->wlSurface()->resource());
+  FEEDBACK->attachMonitor(monitor);
+  FEEDBACK->discarded();
+  PROTO::presentation->queueData(std::move(FEEDBACK));
+}
+
 void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.0f) {
   LOG_SCOPE();
-  const auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
 
   contentBox = box;
   contentBox.round();
-  contentBox = contentBox.expand(-borderSize);
+  contentBox = contentBox.expand(-BORDERSIZE);
   const auto padding = 4;
   const auto barHeight = (FONTSIZE + padding) * scale;
   titleBox = {contentBox.x, contentBox.y, contentBox.width, barHeight};
@@ -71,38 +77,31 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
   if (targetSize.x <= 1 || targetSize.y <= 1)
     return false;
 
+  const auto MONITOR = Desktop::focusState()->monitor();
   auto surfaceSize = window->wlSurface()->getSurfaceBoxGlobal().value_or({0, 0, 0, 0}).size();
+  CRegion fakeDamage = CBox{{0, 0}, targetSize};
+
   if (surfaceSize.x < 1.0 || surfaceSize.y < 1.0) {
     Log::logger->log(Log::ERR, "[{}] WindowSnapshot::update, invalid surface size: {}", PLUGIN_NAME, surfaceSize);
     return false;
   }
 
-  const auto MONITOR = Desktop::focusState()->monitor();
-  if (targetSize.x > 0 && targetSize.y > 0) {
-    if (targetSize > fb.m_size) {
-      fb.alloc(targetSize.x, targetSize.y, MONITOR->m_output->state->state().drmFormat);
-    }
+  if (targetSize > fb.m_size) {
+    fb.alloc(targetSize.x, targetSize.y, MONITOR->m_output->state->state().drmFormat);
   }
 
   g_pHyprRenderer->makeEGLCurrent();
 
-  CRegion fbBox = CBox{{0, 0}, targetSize};
-  if (!g_pHyprRenderer->beginRender(MONITOR, fbBox, RENDER_MODE_FULL_FAKE, nullptr, &fb)) {
+  if (!g_pHyprRenderer->beginRender(MONITOR, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &fb)) {
     return false;
   }
 
   g_pHyprOpenGL->clear(CHyprColor{0, 0, 0, 1.0f});
   g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
 
-  double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
-  auto root = window->wlSurface()->resource();
-
-  root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
-    s->frame(Time::steadyNow());
-  },
-                     nullptr);
-
-  root->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
+  const double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
+  const auto resource = window->wlSurface()->resource();
+  resource->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
     if (!s->m_current.texture)
       return;
 
@@ -110,7 +109,7 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
     box.scale(scale).translate(offset * scale);
     g_pHyprOpenGL->renderTexture(s->m_current.texture, box, {.a = 1.0f});
   },
-                     nullptr);
+                         nullptr);
 
   g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
   g_pHyprRenderer->endRender();
@@ -120,14 +119,11 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
 }
 
 void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha) {
-  const auto FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
   float baseWidth = box.width / scale;
   float padding = 10.0f;
 
-  if (window->m_title != title || std::abs(baseWidth - lastWidth) > 1.0f) {
+  if (window->m_title != title) {
     title = window->m_title;
-    lastWidth = baseWidth;
-
     int maxChars = std::max(5.0f, (float)((baseWidth - padding) / (FONTSIZE * 0.55f)));
     std::string displayTitle = middleTruncate(title, maxChars);
     titleTexture = g_pHyprOpenGL->renderText(displayTitle, CHyprColor(1.0, 1.0, 1.0, 1.0), FONTSIZE);
@@ -144,6 +140,5 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 }
 
 void WindowCard::drawBorder(const float alpha) {
-  LOG(ERR, "borderpass: ({}), alpha: {}", window->m_title, alpha);
   g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = BORDERROUNDING, .roundingPower = BORDERROUNDINGPOWER, .borderSize = BORDERSIZE, .a = alpha});
 }

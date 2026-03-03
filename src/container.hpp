@@ -16,6 +16,7 @@ class WindowCard {
 public:
   WindowCard(PHLWINDOW window);
   ~WindowCard();
+  void requestFrame(PHLMONITOR monitor);
   bool snapshot(const Vector2D &targetSize);
   void draw(const CBox &box, const float scale, const float alpha);
   void drawTitle(const CBox &box, const float scale, const float alpha);
@@ -33,9 +34,6 @@ private:
   CBox contentBox;
   CBox titleBox;
   CBox previewBox;
-  const double borderSize = 4;
-  CGradientValueData borderColor;
-  Vector2D lastSize;
   std::string title;
   SP<CTexture> titleTexture;
   double lastWidth = 0;

@@ -2,6 +2,8 @@
 #include "monitor.hpp"
 #include <map>
 #include <src/SharedDefs.hpp>
+#include <src/helpers/time/Timer.hpp>
+#include <src/managers/eventLoop/EventLoopTimer.hpp>
 #include <src/render/Texture.hpp>
 #include <src/render/pass/PassElement.hpp>
 
@@ -19,6 +21,7 @@ public:
   void prev();
   void rebuild();
   void draw(MONITORID monid, const CRegion &damage);
+  void damageMonitors();
 
   bool active = false;
 
@@ -38,6 +41,8 @@ private:
     CHyprSignalListener monitorAdded;
     CHyprSignalListener monitorRemoved;
   } listeners;
+
+  SP<CEventLoopTimer> loopTimer;
 
   MONITORID activeMonitor = MONITOR_INVALID;
   Timestamp lastFrame;
