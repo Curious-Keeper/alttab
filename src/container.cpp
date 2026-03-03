@@ -9,20 +9,24 @@
 
 WindowCard::WindowCard(PHLWINDOW window) : window(window) {
   commit = window->wlSurface()->resource()->m_events.commit.listen([this] {
-    ready = false;
-    lastCommit = NOW;
+    this->ready = false;
+    // this->lastCommit = NOW;
+    LOG(ERR, "In commit for: {}", this->window->m_title);
   });
 }
 
 WindowCard::~WindowCard() {
-  ;
+  commit.reset();
 }
 
 void WindowCard::requestFrame(PHLMONITOR monitor) {
+  const auto MONITOR = Desktop::focusState()->monitor();
+  const auto resource = window->wlSurface()->resource();
+  // resource->presentFeedback(NOW, MONITOR, false);
   window->wlSurface()->resource()->frame(NOW);
   auto FEEDBACK = makeUnique<CQueuedPresentationData>(window->wlSurface()->resource());
-  FEEDBACK->attachMonitor(monitor);
-  FEEDBACK->discarded();
+  FEEDBACK->attachMonitor(MONITOR);
+  FEEDBACK->presented();
   PROTO::presentation->queueData(std::move(FEEDBACK));
 }
 
