@@ -1,103 +1,32 @@
-#include "../include/manager.hpp"
-#include "../include/renderpasses.hpp"
-#include <hyprland/src/managers/KeybindManager.hpp>
-#include <hyprland/src/plugins/PluginAPI.hpp>
-#include <hyprlang.hpp>
-#include <hyprutils/math/Misc.hpp>
-#include <linux/input-event-codes.h>
+#include "defines.hpp"
+#include "manager.hpp"
 #include <src/Compositor.hpp>
-#include <src/config/ConfigDataValues.hpp>
+#include <src/SharedDefs.hpp>
 #include <src/desktop/state/FocusState.hpp>
-#include <src/devices/IKeyboard.hpp>
-#include <src/event/EventBus.hpp>
+#include <src/helpers/Color.hpp>
 #include <src/managers/input/InputManager.hpp>
+#include <src/plugins/HookSystem.hpp>
+#include <src/plugins/PluginAPI.hpp>
 #include <src/render/Renderer.hpp>
-#include <xkbcommon/xkbcommon-keysyms.h>
 
-APICALL EXPORT std::string PLUGIN_API_VERSION() {
-  return HYPRLAND_API_VERSION;
-}
-
-static bool unloadGuard = false;
-
-static void onRender(eRenderStage stage) {
-  if (!g_pCarouselManager->active)
-    return;
-
-  if (stage == eRenderStage::RENDER_PRE) {
-    g_pHyprRenderer->setCursorHidden(true);
-    g_pCarouselManager->update();
-  }
-
-  if (stage == eRenderStage::RENDER_LAST_MOMENT) {
-    g_pHyprRenderer->m_renderPass.add(makeUnique<BlurPass>());
-    g_pHyprRenderer->m_renderPass.add(makeUnique<RenderPass>(g_pCarouselManager->getRenderList()));
-    g_pHyprRenderer->setCursorHidden(false);
-  }
-
-  g_pCarouselManager->damageMonitors();
-}
-
-static void onWindowCreated(PHLWINDOW w) {
-  if (!CarouselManager::shouldIncludeWindow(w) || !w->m_monitor)
-    return;
-
-  int id = w->m_monitor->m_id;
-  g_pCarouselManager->monitors[id].windows.emplace_back(makeUnique<WindowContainer>(w));
-  g_pCarouselManager->refreshLayout();
-}
-
-static void onWindowClosed(PHLWINDOW w) {
-  bool found = false;
-  for (auto &[id, mon] : g_pCarouselManager->monitors) {
-    for (auto &el : mon.windows) {
-      if (el->window == w) {
-        el->markForRemoval();
-        found = true;
-        break;
-      }
-    }
-    if (found)
-      break;
-  }
-  g_pCarouselManager->refreshLayout();
-}
-
-static void onWindowMoveToWorkspace(PHLWINDOW w, PHLWORKSPACE ws) {
-  if (!g_pCarouselManager->active)
-    return;
-  Log::logger->log(Log::TRACE, "[{}] onWindowMoveToWorkspace for window: {}", PLUGIN_NAME, w->m_title);
-  g_pCarouselManager->rebuildAll();
-}
-
-static void onMonitorAdded() {
-  ;
-  // TODO: Add monitor row
-}
-
-// STUPID FOCUSTATE BUG!
-static void onMonitorFocusChange(PHLMONITOR m) {
-  MONITOR = m;
-}
-
-static CFunctionHook *keyhookfn = nullptr;
+CFunctionHook *keyhookfn = nullptr;
 typedef bool (*CKeybindManager_onKeyEvent)(void *self, std::any &event, SP<IKeyboard> pKeyboard);
 
 static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
-  if (!keyhookfn || !keyhookfn->m_original || unloadGuard)
+  if (!keyhookfn || !keyhookfn->m_original)
     return true;
 
   auto e = std::any_cast<IKeyboard::SKeyEvent>(event);
   const auto MODS = g_pInputManager->getModsFromAllKBs();
 
-  if (!g_pCarouselManager->active && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+  if (!manager->active && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     if (e.keycode == 15 && (MODS & HL_MODIFIER_ALT)) {
-      g_pCarouselManager->activate();
+      manager->activate();
       return false;
     }
   }
 
-  if (!g_pCarouselManager->active)
+  if (!manager->active)
     return ((CKeybindManager_onKeyEvent)keyhookfn->m_original)(self, event, pKeyboard);
 
   const auto KEYSYM = xkb_state_key_get_one_sym(pKeyboard->m_xkbState, e.keycode + 8);
@@ -108,78 +37,46 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
     case XKB_KEY_ISO_Left_Tab:
     case XKB_KEY_d:
     case XKB_KEY_Right:
-      (MODS & HL_MODIFIER_SHIFT) ? g_pCarouselManager->prev() : g_pCarouselManager->next();
+      (MODS & HL_MODIFIER_SHIFT) ? manager->prev() : manager->next();
       break;
 
     case XKB_KEY_Down:
     case XKB_KEY_s:
-      g_pCarouselManager->down();
+      manager->down();
       break;
 
     case XKB_KEY_a:
     case XKB_KEY_Left:
-      g_pCarouselManager->prev();
+      manager->prev();
       break;
 
     case XKB_KEY_w:
     case XKB_KEY_Up:
-      g_pCarouselManager->up();
+      manager->up();
       break;
 
     case XKB_KEY_Return:
     case XKB_KEY_space:
-      g_pCarouselManager->confirm();
+      manager->confirm();
       break;
 
     case XKB_KEY_Escape:
-      g_pCarouselManager->deactivate();
+      manager->deactivate();
       break;
     }
   } else {
     if (KEYSYM == XKB_KEY_Alt_L || KEYSYM == XKB_KEY_Alt_R || KEYSYM == XKB_KEY_Super_L) {
-      g_pCarouselManager->confirm();
+      manager->confirm();
     }
   }
 
   return false;
 }
 
-static void onMouseClick(IPointer::SButtonEvent const &e, Event::SCallbackInfo &i) {
-  if (!g_pCarouselManager->active)
-    return;
-  if (e.state != WL_POINTER_BUTTON_STATE_PRESSED)
-    return;
-
-  i.cancelled = true;
-  Vector2D mouseCoords = g_pInputManager->getMouseCoordsInternal();
-  mouseCoords *= MONITOR->m_scale;
-
-  auto list = g_pCarouselManager->getRenderList();
-  for (auto *el : list) {
-    if (el->shouldBeRemoved())
-      continue;
-
-    if (el->onMouseClick(mouseCoords)) {
-      break;
-    }
-  }
-}
-
-static void onMouseMove(Vector2D const &, Event::SCallbackInfo &) {
-  if (!g_pCarouselManager->active)
-    return;
-  Vector2D mousePos = g_pInputManager->getMouseCoordsInternal();
-
-  auto list = g_pCarouselManager->getRenderList();
-  for (auto *el : list) {
-    el->onMouseMove(mousePos);
-  }
-}
-
 // Straight from ConfigManager.cpp. THANKS GUYS!
 inline Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **data) {
-  if (unloadGuard)
-    return {};
+  // if (unloadGuard)
+  //   return {};
   std::string V = VALUE;
 
   if (!*data)
@@ -239,34 +136,39 @@ inline Hyprlang::CParseResult configHandleGradientSet(const char *VALUE, void **
 }
 
 inline void configHandleGradientDestroy(void **data) {
-  if (unloadGuard)
-    return;
+  // if (unloadGuard)
+  //   return;
   if (*data)
     delete sc<CGradientValueData *>(*data);
 }
 
-static void onConfigReload() {
-  Log::logger->log(Log::TRACE, "[{}] onConfigReload", PLUGIN_NAME);
-  g_pCarouselManager->rebuildAll();
+APICALL EXPORT std::string PLUGIN_API_VERSION() {
+  return HYPRLAND_API_VERSION;
 }
-
-struct EventListeners {
-  Hyprutils::Signal::CHyprSignalListener render;
-  Hyprutils::Signal::CHyprSignalListener monitorAdded;
-  Hyprutils::Signal::CHyprSignalListener windowOpen;
-  Hyprutils::Signal::CHyprSignalListener windowClose;
-  Hyprutils::Signal::CHyprSignalListener windowMoveToWorkspace;
-  Hyprutils::Signal::CHyprSignalListener configReloaded;
-  Hyprutils::Signal::CHyprSignalListener monitorFocused;
-  Hyprutils::Signal::CHyprSignalListener mouseButton;
-  Hyprutils::Signal::CHyprSignalListener mouseMove;
-};
-static EventListeners g_eventListeners;
-
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   PHANDLE = handle;
   if (const std::string hash = __hyprland_api_get_hash(); hash != __hyprland_api_get_client_hash())
     throw std::runtime_error("Version mismatch");
+
+  manager = makeUnique<Manager>();
+
+  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab", [&](std::string args) -> SDispatchResult {
+    LOG_SCOPE()
+    manager->toggle();
+    g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
+    return {};
+  });
+
+  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-next", [&](std::string args) -> SDispatchResult {
+    if (manager->active)
+      manager->next();
+    return {};
+  });
+  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-prev", [&](std::string args) -> SDispatchResult {
+    if (manager->active)
+      manager->prev();
+    return {};
+  });
 
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
@@ -274,35 +176,24 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding_power", Hyprlang::FLOAT{2});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_spacing", Hyprlang::INT{10});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_inactive", Hyprlang::FLOAT{0.8});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size", Hyprlang::FLOAT{0.3});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:animation_speed", Hyprlang::FLOAT{1.0});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{0.6});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:animation_speed", Hyprlang::FLOAT{ROTATIONSPEED});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:include_special", Hyprlang::INT{1});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::INT{10});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_active", Hyprlang::FLOAT{0.4});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_size_inactive", Hyprlang::FLOAT{0.3});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur_enabled", Hyprlang::INT{1});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_enabled", Hyprlang::INT{1});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_amount", Hyprlang::FLOAT{0.15});
-
-  g_pCarouselManager = makeUnique<CarouselManager>();
-
-  g_eventListeners.render = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { onRender(stage); });
-  g_eventListeners.monitorAdded = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR) { onMonitorAdded(); });
-  g_eventListeners.windowOpen = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) { onWindowCreated(w); });
-  g_eventListeners.windowClose = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) { onWindowClosed(w); });
-  g_eventListeners.windowMoveToWorkspace =
-      Event::bus()->m_events.window.moveToWorkspace.listen([](PHLWINDOW w, PHLWORKSPACE ws) { onWindowMoveToWorkspace(w, ws); });
-  g_eventListeners.configReloaded = Event::bus()->m_events.config.reloaded.listen([]() { onConfigReload(); });
-  g_eventListeners.monitorFocused = Event::bus()->m_events.monitor.focused.listen([](PHLMONITOR m) { onMonitorFocusChange(m); });
-  g_eventListeners.mouseButton = Event::bus()->m_events.input.mouse.button.listen([](IPointer::SButtonEvent const &e, Event::SCallbackInfo &i) { onMouseClick(e, i); });
-  g_eventListeners.mouseMove = Event::bus()->m_events.input.mouse.move.listen([](Vector2D const &pos, Event::SCallbackInfo &i) { onMouseMove(pos, i); });
-
-  HyprlandAPI::reloadConfig();
-
-  MONITOR = Desktop::focusState()->monitor();
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur", Hyprlang::INT{BLURBG});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim", Hyprlang::INT{DIMENABLED});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_amount", Hyprlang::FLOAT{DIMAMOUNT});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:powersave", Hyprlang::INT{POWERSAVE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:carousel_size", Hyprlang::FLOAT{CAROUSELSIZE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size", Hyprlang::FLOAT{WINDOWSIZE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_active", Hyprlang::FLOAT{WINDOWSIZEACTIVE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_inactive", Hyprlang::FLOAT{WINDOWSIZEINACTIVE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:warp", Hyprlang::FLOAT{WARP});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:tilt", Hyprlang::FLOAT{TILT});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:bring_to_active", Hyprlang::INT{BRINGTOACTIVE});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:split_monitor", Hyprlang::INT{SPLITMONITOR});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::FLOAT{MONITORSPACING});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_animation_speed", Hyprlang::FLOAT{MONITORANIMATIONSPEED});
 
   try {
     auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
@@ -319,15 +210,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   } catch (const std::exception &e) {
     Log::logger->log(Log::ERR, "Failed to hook CKeybindManager::onKeyEvent: {}", e.what());
   }
+
   return {PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_AUTHOR, PLUGIN_VERSION};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
-  unloadGuard = true;
-  if (keyhookfn)
-    keyhookfn->unhook();
-  g_eventListeners = {};
-  g_pCarouselManager.reset();
-  MONITOR = nullptr;
-  PHANDLE = nullptr;
+  manager.reset();
 }

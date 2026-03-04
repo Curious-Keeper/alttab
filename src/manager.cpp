@@ -1,394 +1,306 @@
-#include "../include/manager.hpp"
+#include "manager.hpp"
+#include "defines.hpp"
+#include <aquamarine/output/Output.hpp>
+#include <chrono>
+#include <hyprutils/math/Vector2D.hpp>
 #include <src/Compositor.hpp>
-#include <src/desktop/history/WindowHistoryTracker.hpp>
 #include <src/desktop/state/FocusState.hpp>
-#include <src/managers/input/InputManager.hpp>
+#include <src/helpers/Color.hpp>
+#include <src/helpers/Monitor.hpp>
+#include <src/managers/eventLoop/EventLoopManager.hpp>
+#include <src/plugins/PluginAPI.hpp>
+#include <src/protocols/PresentationTime.hpp>
+#include <src/render/pass/RectPassElement.hpp>
+#include <src/render/pass/TexPassElement.hpp>
+#define private public
+#include <src/render/OpenGL.hpp>
+#include <src/render/Renderer.hpp>
+#undef private
 
-CarouselManager::CarouselManager() {
-  Log::logger->log(Log::TRACE, "[{}] CarouselManager ctor", PLUGIN_NAME);
+#ifndef NDEBUG
+static int counter = 0;
+static int lastCounter = 0;
+#endif
+
+Manager::Manager() {
+  LOG_SCOPE()
+  listeners.config = HOOK_EVENT(config.reloaded, [this]() {
+    onConfigReload();
+  });
+  listeners.windowCreated = HOOK_EVENT(window.open, [this](auto w) {
+    onWindowCreated(w);
+  });
+  listeners.windowDestroyed = HOOK_EVENT(window.close, [this](auto w) {
+    onWindowDestroyed(w);
+  });
+  listeners.render = HOOK_EVENT(render.stage, [this](auto s) {
+    onRender(s);
+  });
+  listeners.focusChange = HOOK_EVENT(monitor.focused, [this](auto m) {
+    onFocusChange(m);
+  });
+  listeners.monitorAdded = HOOK_EVENT(monitor.added, [this](auto m) {
+    rebuild();
+  });
+  listeners.monitorRemoved = HOOK_EVENT(monitor.removed, [this](auto m) {
+    rebuild();
+  });
+
+  lastFrame = lastUpdate = NOW;
 }
-void CarouselManager::toggle() {
+
+void Manager::damageMonitors() {
+  for (auto &[id, mon] : monitors) {
+    g_pHyprRenderer->damageMonitor(mon->monitor);
+  }
+}
+
+void Manager::activate() {
+  LOG_SCOPE()
+  active = true;
+  activeMonitor = Desktop::focusState()->monitor()->m_id;
+  rebuild();
+  loopTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(10), [this](SP<CEventLoopTimer> timer, void *data) {
+    auto d = FloatTime(NOW - lastFrame).count();
+    auto min = std::min(d, (monitors[activeMonitor]->monitor->m_refreshRate * 2) / 1000);
+    update(min);
+    lastFrame = NOW;
+    loopTimer->updateTimeout(std::chrono::milliseconds(16)); }, nullptr);
+  g_pEventLoopManager->addTimer(loopTimer);
+}
+
+void Manager::deactivate() {
+  LOG_SCOPE()
+  active = false;
+  for (const auto &[id, mon] : monitors) {
+    g_pHyprRenderer->damageMonitor(mon->monitor);
+  }
+  loopTimer.reset();
+}
+
+void Manager::toggle() {
+  LOG_SCOPE()
+  LOG(ERR, "toggle");
   active = !active;
-  if (!active)
+  if (active)
+    activate();
+  else
     deactivate();
 }
 
-void CarouselManager::activate() {
-  if (active)
-    return;
-
-  rebuildAll();
-  if (monitors.empty())
-    return;
-
-  active = true;
-  MONITOR = Desktop::focusState()->monitor();
-  lastframe = std::chrono::steady_clock::now();
-
-  const auto focusedWindow = Desktop::focusState()->window();
-  const auto hist = Desktop::History::windowTracker()->fullHistory();
-  auto prevWindow = (hist.size() > 1) ? *(hist.end() - 2) : focusedWindow;
-
-  if (!MONITOR || !focusedWindow) {
-    Log::logger->log(Log::ERR, "Failed to get focused window or monitor");
+void Manager::confirm() {
+  const auto &mon = monitors[activeMonitor];
+  if (!mon || mon->windows.empty()) {
+    deactivate();
     return;
   }
-
-  auto updateFocus = [&]() {
-    for (auto [mIdx, mon_entry] : monitors | std::views::enumerate) {
-      auto &[id, mon] = mon_entry;
-      auto it = std::ranges::find_if(mon.windows, [&](const auto &w) {
-        return w->window == prevWindow;
-      });
-
-      if (it != mon.windows.end()) {
-        activeMonitorIndex = mIdx;
-        mon.activeIndex = std::distance(mon.windows.begin(), it);
-        return true;
-      }
-    }
-    return false;
-  };
-
-  if (!updateFocus()) {
-    Log::logger->log(Log::INFO, "[{}] prevWindow not found in monitors; focus remains default", PLUGIN_NAME);
-  }
-
-  refreshLayout(true);
-  g_pCompositor->scheduleFrameForMonitor(MONITOR);
-}
-
-void CarouselManager::damageMonitors() {
-  for (auto &mon : g_pCompositor->m_monitors) {
-    if (!mon || !mon->m_enabled)
-      continue;
-    g_pHyprRenderer->damageMonitor(mon);
-  }
-}
-
-void CarouselManager::deactivate() {
-  active = false;
-  g_pHyprRenderer->m_renderPass.removeAllOfType("TabCarouselPassElement");
-  g_pHyprRenderer->m_renderPass.removeAllOfType("TabCarouselBlurElement");
-  damageMonitors();
-}
-
-void CarouselManager::next(bool snap) {
-  if (monitors.empty())
-    return;
-
-  auto it = std::next(monitors.begin(), activeMonitorIndex);
-  auto &mon = it->second;
-
-  if (mon.windows.empty())
-    return;
-
-  mon.activeIndex = (mon.activeIndex + 1) % mon.windows.size();
-  refreshLayout(snap);
-}
-
-void CarouselManager::prev(bool snap) {
-  if (monitors.empty())
-    return;
-
-  auto it = std::next(monitors.begin(), activeMonitorIndex);
-  auto &mon = it->second;
-
-  if (mon.windows.empty())
-    return;
-
-  mon.activeIndex = (mon.activeIndex + mon.windows.size() - 1) % mon.windows.size();
-  refreshLayout(snap);
-}
-
-void CarouselManager::up(bool snap) {
-  if (monitors.empty())
-    return;
-  activeMonitorIndex = (activeMonitorIndex - 1 + monitors.size()) % monitors.size();
-  refreshLayout(snap);
-}
-
-void CarouselManager::down(bool snap) {
-  if (monitors.empty())
-    return;
-  activeMonitorIndex = (activeMonitorIndex + 1) % monitors.size();
-  refreshLayout(snap);
-}
-
-void CarouselManager::confirm() {
-  if (!monitors.empty()) {
-    auto window = monitors[activeMonitorIndex].windows[monitors[activeMonitorIndex].activeIndex]->window;
-    // Fuck the stupid follow mouse behaviour. We force it.
-    g_pInputManager->unconstrainMouse();
-    window->m_relativeCursorCoordsOnLastWarp = g_pInputManager->getMouseCoordsInternal() - window->m_position;
-    Desktop::focusState()->fullWindowFocus(window, Desktop::eFocusReason::FOCUS_REASON_KEYBIND);
-    if (window->m_monitor != MONITOR) {
-      window->warpCursor();
-      g_pInputManager->m_forcedFocus = window;
-      g_pInputManager->simulateMouseMovement();
-      g_pInputManager->m_forcedFocus.reset();
-      Desktop::focusState()->rawMonitorFocus(MONITOR);
-    }
-  }
+  auto selected = mon->windows[mon->activeWindow]->window;
+  if (BRINGTOACTIVE)
+    g_pKeybindManager->m_dispatchers["focusworkspaceoncurrentmonitor"](selected->m_workspace->m_name);
+  Desktop::focusState()->fullWindowFocus(selected, Desktop::FOCUS_REASON_KEYBIND);
   deactivate();
 }
 
-bool CarouselManager::shouldIncludeWindow(PHLWINDOW w) {
-  static auto INCLUDE_SPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
-
-  if (INCLUDE_SPECIAL)
-    return true;
-  return w->m_workspace && !w->m_workspace->m_isSpecialWorkspace;
-}
-
-void CarouselManager::rebuildAll() {
-  Log::logger->log(Log::TRACE, "[{}] rebuildAll (pruning)", PLUGIN_NAME);
-
-  if (!MONITOR || g_pCompositor->m_unsafeState || g_pCompositor->m_windows.empty())
-    return;
-
-  for (auto &[id, m] : monitors) {
-    std::erase_if(m.windows, [&](auto &container) {
-      auto window = container->window;
-
-      return !window ||
-             !window->m_isMapped ||
-             !shouldIncludeWindow(window) ||
-             window->m_monitor->m_id != id;
-    });
-  }
-
-  for (auto &el : g_pCompositor->m_windows) {
-    if (!el || !el->m_isMapped || !el->m_monitor || !shouldIncludeWindow(el))
-      continue;
-
-    auto id = el->m_monitor->m_id;
-
-    bool exists = std::any_of(monitors[id].windows.begin(), monitors[id].windows.end(), [&](auto &container) {
-      return container->window == el;
-    });
-
-    if (!exists) {
-      monitors[id].windows.emplace_back(makeUnique<WindowContainer>(el));
+void Manager::update(float delta) {
+  LOG_SCOPE()
+  const auto MONITOR = Desktop::focusState()->monitor();
+  monitorOffset.tick(delta, MONITORANIMATIONSPEED);
+  for (const auto &[id, m] : monitors) {
+    m->update(delta, id == activeMonitor);
+    if (m->animating || !monitorOffset.done()) {
+      // God i'm stupid sometimes. Ofc only damage the active monitor or animations will be fucked.
+      g_pHyprRenderer->damageMonitor(MONITOR);
     }
   }
-
-  refreshLayout();
 }
 
-void CarouselManager::refreshLayout(bool snap) {
-  if (!MONITOR || monitors.empty())
-    return;
+void Manager::up() {
+  activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
+  monitorOffset.set(activeMonitor, false);
+}
 
-  static auto MONITOR_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:monitor_spacing");
-  static auto MONITOR_SIZE_ACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_active");
-  static auto MONITOR_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_size_inactive");
-  static auto WINDOW_SPACING = *CConfigValue<Hyprlang::INT>("plugin:alttab:window_spacing");
-  static auto WINDOW_SIZE_INACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
-  static auto BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
-  static auto UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
+void Manager::down() {
+  activeMonitor = (activeMonitor + 1) % monitors.size();
+  monitorOffset.set(activeMonitor, false);
+}
 
-  const auto msize = (MONITOR->m_size * MONITOR->m_scale).round();
-  const auto center = msize / 2.0;
-  const auto spacing = BORDERSIZE + WINDOW_SPACING;
+void Manager::next() {
+  monitors[activeMonitor]->next();
+}
 
-  const double activeRowH = msize.y * MONITOR_SIZE_ACTIVE;
-  const double inactiveRowH = msize.y * MONITOR_SIZE_INACTIVE;
+void Manager::prev() {
+  monitors[activeMonitor]->prev();
+}
 
-  const double verticalStep = ((activeRowH + (inactiveRowH * WINDOW_SIZE_INACTIVE)) / 2.0) + MONITOR_SPACING;
+void Manager::draw(MONITORID monid, const CRegion &damage) {
+  LOG_SCOPE()
+  const auto cur = Desktop::focusState()->monitor();
+  auto dmg = damage;
 
-  int currentRow = 0;
-  for (auto &[id, monData] : monitors) {
-    auto activeList = monData.windows | std::views::transform([](auto &w) { return w.get(); }) | std::views::filter([](auto *w) { return !w->shouldBeRemoved(); }) | std::ranges::to<std::vector<WindowContainer *>>();
-
-    if (activeList.empty()) {
-      currentRow++;
-      continue;
-    }
-
-    bool isRowSelected = (currentRow == (int)activeMonitorIndex);
-    double rowBaseH = isRowSelected ? activeRowH : inactiveRowH;
-    double rowCenterY = center.y + (currentRow - (int)activeMonitorIndex) * verticalStep;
-
-    for (size_t j = 0; j < activeList.size(); ++j) {
-      auto goal = activeList[j]->window->m_realSize->goal();
-      double aspect = std::clamp(goal.x / std::max(goal.y, 1.0), 0.1, 5.0);
-
-      double h = (j == monData.activeIndex && isRowSelected) ? rowBaseH : (rowBaseH * WINDOW_SIZE_INACTIVE);
-      activeList[j]->animSize.set(Vector2D(h * aspect, h), snap);
-    }
-
-    auto activeWin = activeList[std::min(monData.activeIndex, activeList.size() - 1)];
-    activeWin->animPos.set(Vector2D(center.x - (activeWin->animSize.target.x / 2.0), rowCenterY - (activeWin->animSize.target.y / 2.0)), snap);
-
-    auto leftX = activeWin->animPos.target.x;
-    for (auto *w : activeList | std::views::take(monData.activeIndex) | std::views::reverse) {
-      leftX -= (w->animSize.target.x + spacing);
-      w->animPos.set(Vector2D(leftX, rowCenterY - (w->animSize.target.y / 2.0)), snap);
-    }
-
-    auto rightX = activeWin->animPos.target.x + activeWin->animSize.target.x;
-    for (auto *w : activeList | std::views::drop(monData.activeIndex + 1)) {
-      w->animPos.set(Vector2D(rightX + spacing, rowCenterY - (w->animSize.target.y / 2.0)), snap);
-      rightX += (w->animSize.target.x + spacing);
-    }
-
-    for (auto *w : activeList) {
-      bool isFocused = (w == activeWin && isRowSelected);
-      w->alpha.set(isFocused ? 1.0f : UNFOCUSEDALPHA, snap);
-      w->border->isActive = isFocused;
-    }
-
-    currentRow++;
+  if (!POWERSAVE) {
+    g_pHyprOpenGL->renderRect(dmg.getExtents(), CHyprColor(0.0, 0.0, 0.0, (DIMENABLED) ? DIMAMOUNT : 0), {.blur = sc<bool>(BLURBG)});
+  } else {
+    if (monitors.contains(monid))
+      monitors[monid]->renderTexture(damage);
   }
-}
 
-bool CarouselManager::isElementOnScreen(WindowContainer *w) {
-  if (!MONITOR)
-    return false;
+  if (monid == cur->m_id) {
+#ifndef NDEBUG
+    Overlay->add(std::format("ActiveInternal: {}, ActiveInFocus: {}, monid: {}", activeMonitor, cur->m_name, monid));
+#endif
 
-  auto mBox = CBox{MONITOR->m_position, MONITOR->m_size}.scale(MONITOR->m_scale);
-  auto wBox = CBox{w->pos, w->size};
-  return mBox.intersection(wBox).width > 0;
-}
+    if (!SPLITMONITOR) {
+      monitors[monid]->draw(damage, 0, true);
+    } else {
+      const auto spacing = cur->m_size.y * MONITORSPACING;
+      int i = 0;
+      for (const auto &[id, mon] : monitors) {
+        if (id == activeMonitor) {
+          i++;
+          continue;
+        }
 
-void CarouselManager::update() {
-  if (!active || monitors.empty())
-    return;
-
-  auto now = std::chrono::steady_clock::now();
-  double delta = std::chrono::duration_cast<std::chrono::microseconds>(now - lastframe).count() / 1000000.0;
-  lastframe = now;
-
-  std::vector<WindowContainer *> needsUpdate;
-  size_t currentRowIdx = 0;
-  bool anyWindowsLeft = false;
-
-  for (auto it = monitors.begin(); it != monitors.end();) {
-    auto &row = it->second;
-
-    std::erase_if(row.windows, [](auto &el) { return el->shouldBeRemoved(); });
-
-    if (row.windows.empty()) {
-      it = monitors.erase(it);
-      continue;
-    }
-
-    if (row.activeIndex >= row.windows.size())
-      row.activeIndex = row.windows.empty() ? 0 : row.windows.size() - 1;
-
-    bool isRowActive = (currentRowIdx == activeMonitorIndex);
-
-    for (size_t i = 0; i < row.windows.size(); ++i) {
-      auto &w = row.windows[i];
-      w->update(delta);
-
-      auto age = now - w->snapshot->lastUpdated;
-      bool onScreen = isElementOnScreen(w.get());
-      bool isWindowActive = (isRowActive && i == row.activeIndex);
-
-      std::chrono::milliseconds threshold;
-      if (isWindowActive) {
-        threshold = std::chrono::milliseconds((1000 / 30));
-      } else if (onScreen) {
-        threshold = std::chrono::milliseconds((1000 / 10));
-      } else {
-        threshold = std::chrono::milliseconds((1000 / 5));
+        float offset = (i - monitorOffset.current) * spacing;
+        mon->draw(damage, offset, false);
+        i++;
       }
+      int activeMon = 0;
+      int counter = 0;
+      for (const auto &[id, mon] : monitors) {
+        if (id == activeMonitor) {
+          activeMon = counter;
+          break;
+        }
+        counter++;
+      }
+      float activeOffset = (activeMon - monitorOffset.current) * spacing;
+      monitors[activeMonitor]->draw(damage, activeOffset, true);
+#ifndef NDEBUG
+      Overlay->add(std::format("monitor->m_size.x: {}, monitor->m_size.y: {}\nmonitor->m_pixelSize.x: {}, monitor->m_pixelSize.y: {}", monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y, monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y));
+#endif
+    }
+  }
 
-      if (!w->snapshot->ready || age > threshold) {
-        needsUpdate.push_back(w.get());
+#ifndef NDEBUG
+  Overlay->draw(cur);
+#endif
+}
+
+void Manager::onConfigReload() {
+  FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
+  BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
+  BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
+  BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
+
+  ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
+  INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
+
+  DIMENABLED = *CConfigValue<Hyprlang::INT>("plugin:alttab:dim");
+  DIMAMOUNT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:dim_amount");
+  BLURBG = *CConfigValue<Hyprlang::INT>("plugin:alttab:blur");
+  UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
+  POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
+  ROTATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
+  CAROUSELSIZE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:carousel_size");
+  WINDOWSIZE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size");
+  WARP = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:warp");
+  TILT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:tilt");
+  WINDOWSIZEACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_active");
+  WINDOWSIZEINACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
+  MONITORSPACING = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_spacing");
+  MONITORANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_animation_speed");
+  SPLITMONITOR = *CConfigValue<Hyprlang::INT>("plugin:alttab:split_monitor");
+  UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
+  POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
+}
+
+void Manager::onWindowCreated(PHLWINDOW window) {
+  // TODO: add window to specific monitor
+  rebuild();
+}
+
+void Manager::onWindowDestroyed(PHLWINDOW window) {
+  if (!window)
+    return;
+
+  auto mon = window->m_monitor.lock();
+
+  if (mon && monitors.contains(mon->m_id)) {
+    if (monitors[mon->m_id]->removeWindow(window) == 0) {
+      monitors.erase(mon->m_id);
+    }
+  } else {
+    for (auto &[id, mon] : monitors) {
+      if (mon->removeWindow(window) == 0) {
+        monitors.erase(id);
+        break;
       }
     }
-
-    anyWindowsLeft = true;
-    currentRowIdx++;
-    ++it;
   }
+}
 
-  if (!anyWindowsLeft) {
-    deactivate();
+void Manager::onRender(eRenderStage stage) {
+  if (!active)
     return;
-  }
 
-  if (activeMonitorIndex >= monitors.size())
-    activeMonitorIndex = monitors.empty() ? 0 : monitors.size() - 1;
+  static bool redraw = false;
+  switch (stage) {
+  case eRenderStage::RENDER_PRE: {
 
-  std::sort(needsUpdate.begin(), needsUpdate.end(), [this](auto *a, auto *b) {
-    bool aOn = isElementOnScreen(a);
-    bool bOn = isElementOnScreen(b);
-    if (aOn != bOn)
-      return aOn;
-    return a->snapshot->lastUpdated < b->snapshot->lastUpdated;
-  });
-
-  Log::logger->log(Log::TRACE, "[{}] update (needsUpdate.size={})", PLUGIN_NAME, needsUpdate.size());
-
-  int processed = 0;
-  const int FRAME_BUDGET = 2;
-  for (auto *w : needsUpdate) {
-    if (processed >= FRAME_BUDGET)
-      break;
-    w->snapshot->snapshot();
-    processed++;
+  } break;
+  case eRenderStage::RENDER_LAST_MOMENT:
+    g_pHyprRenderer->m_renderPass.add(makeUnique<RenderPass>());
+    break;
+  default:
+    break;
   }
 }
 
-std::vector<Element *> CarouselManager::getRenderList() {
-  std::vector<std::pair<int, Element *>> indexed;
-
-  size_t rowIndex = 0;
-  for (auto &[id, monData] : monitors) {
-    int rowDist = std::abs(static_cast<int>(rowIndex) - static_cast<int>(activeMonitorIndex));
-
-    for (size_t winIndex = 0; winIndex < monData.windows.size(); ++winIndex) {
-      int winDist = std::abs(static_cast<int>(winIndex) - static_cast<int>(monData.activeIndex));
-
-      int priority = (rowDist * 1000) + winDist;
-      indexed.push_back({priority, monData.windows[winIndex].get()});
-    }
-    rowIndex++;
-  }
-
-  std::ranges::sort(indexed, std::greater<>{}, [](const auto &p) { return p.first; });
-
-  std::vector<Element *> result;
-  for (auto &p : indexed) {
-    result.push_back(p.second);
-  }
-
-  return result;
+void Manager::onFocusChange(PHLMONITOR monitor) {
+  if (monitor == nullptr)
+    return;
+  activeMonitor = monitor->m_id;
 }
 
-bool CarouselManager::windowPicked(Vector2D mousePos) {
-  auto list = getRenderList();
+void Manager::rebuild() {
+  LOG_SCOPE()
 
-  for (auto it = list.rbegin(); it != list.rend(); ++it) {
-    WindowContainer *wc = dynamic_cast<WindowContainer *>(*it);
-    if (!wc)
+  const auto INCLUDESPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
+
+  for (const auto &m : g_pCompositor->m_monitors) {
+    if (!m->m_enabled || m->m_isUnsafeFallback)
       continue;
-
-    CBox windowBox = {wc->pos, wc->size};
-
-    if (windowBox.containsPoint(mousePos)) {
-      updateSelection(wc);
-      return true;
-    }
+    monitors[m->m_id] = makeUnique<Monitor>(m);
   }
-  return false;
-}
 
-void CarouselManager::updateSelection(WindowContainer *target) {
-  size_t rIdx = 0;
-  for (auto &[id, mon] : monitors) {
-    for (size_t wIdx = 0; wIdx < mon.windows.size(); ++wIdx) {
-      if (mon.windows[wIdx].get() == target) {
-        activeMonitorIndex = rIdx;
-        mon.activeIndex = wIdx;
-        refreshLayout();
-        return;
+  auto activeWindow = Desktop::focusState()->window();
+  activeMonitor = Desktop::focusState()->monitor()->m_id;
+  monitorOffset.snap(activeMonitor);
+
+  for (auto &[monID, mon] : monitors) {
+    std::vector<PHLWINDOW> monitorWindows;
+    for (const auto &w : g_pCompositor->m_windows) {
+      if (!INCLUDESPECIAL && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
+        continue;
+      if (w->m_isMapped && w->m_monitor.lock() && (!SPLITMONITOR || w->m_monitor == mon->monitor))
+        monitorWindows.emplace_back(w);
+    }
+
+    for (const auto &w : monitorWindows) {
+      auto card = mon->addWindow(w);
+      if (w == activeWindow) {
+        mon->activeWindow = mon->windows.size() - 1;
+        const int count = monitorWindows.size();
+        const float angle = (M_PI / 2.0f) - ((2.0f * M_PI * mon->activeWindow) / count);
+        mon->rotation.snap(angle);
       }
     }
-    rIdx++;
+    g_pHyprRenderer->damageMonitor(mon->monitor);
+    // damageMonitor should do this??
+    // g_pCompositor->scheduleFrameForMonitor(mon->monitor);
   }
+}
+void RenderPass::draw(const CRegion &damage) {
+  const auto MON = g_pHyprOpenGL->m_renderData.pMonitor;
+  manager->draw(MON->m_id, damage);
 }
