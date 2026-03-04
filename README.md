@@ -2,7 +2,8 @@
 
 Alt-tab style window carousel for Hyprland. Shows live previews of windows; cycle with Tab/arrows and pick with Enter/Release.
 
-![alttab](https://github.com/user-attachments/assets/5a3fc189-ea30-4719-a939-e2d485ea04eb)
+[![alttab]([https://github.com/user-attachments/assets/5a3fc189-ea30-4719-a939-e2d485ea04eb](https://github.com/user-attachments/assets/a8757771-ad23-46a1-92e5-59683994e223))
+](https://github.com/user-attachments/assets/a8757771-ad23-46a1-92e5-59683994e223)
 
 ## Requirements
 
@@ -104,6 +105,7 @@ plugin {
     warp = 0.20
     tilt = 10
     split_monitor = true
+    bring_to_active = true
   }
 }
 ```
