@@ -133,22 +133,22 @@ void Monitor::update(const float delta, const bool active) {
     renderTasks.emplace_back(RenderTask{windows[i].get(), data, visibility, FloatTime(NOW - windows[i]->lastSnapshot).count()});
   }
 
-  std::sort(renderTasks.begin(), renderTasks.end(), [](const RenderTask &a, const RenderTask &b) {
-    return a.since > b.since;
+  std::vector<RenderTask *> snapshotRR;
+  for (auto &t : renderTasks)
+    snapshotRR.emplace_back(&t);
+
+  std::sort(snapshotRR.begin(), snapshotRR.end(), [](const RenderTask *a, const RenderTask *b) {
+    return a->since > b->since;
   });
 
   int snapshotsDone = 0;
-
-  for (auto &task : renderTasks) {
-    // Only update if it's actually visible enough to care
-    if (task.visibility > 0.10f) {
-      if (!task.card->ready || task.since > 0.5f) {
-        if (snapshotsDone < 2) {
-          task.card->requestFrame(MONITOR);
-          task.card->snapshot(mSize * WINDOWSIZE);
-          snapshotsDone++;
-          damage = true;
-        }
+  for (auto task : snapshotRR) {
+    if (task->visibility > 0.10f && (!task->card->ready || task->since > 0.5f)) {
+      if (snapshotsDone < 2) {
+        task->card->requestFrame(MONITOR);
+        task->card->snapshot(mSize * WINDOWSIZE);
+        snapshotsDone++;
+        damage = true;
       }
     }
   }
@@ -156,20 +156,19 @@ void Monitor::update(const float delta, const bool active) {
   animating = damage;
 }
 
-void Monitor::draw(const CRegion &damage, const float &offset, const bool active) {
+void Monitor::draw(const CRegion &damage, const float &offset, const bool active, const float alpha = 1.0f) {
   if (renderTasks.empty())
     return;
 
+  // Sorting by Z is fine here; it only affects the painter's algorithm order
   std::sort(renderTasks.begin(), renderTasks.end(), [](const auto &a, const auto &b) {
     return a.data.z < b.data.z;
   });
 
-  CRegion dmg;
   for (const auto &task : renderTasks) {
     auto box = task.data.box;
     box.translate({0.0f, offset});
-    task.card->draw(box, task.data.scale, task.data.alpha);
-    dmg.add(box);
+    task.card->draw(box, task.data.scale, std::min(task.data.alpha, alpha));
   }
 #ifndef NDEBUG
   if (!dmg.empty())
@@ -186,16 +185,11 @@ Monitor::CardData Monitor::getCardBox(int index, const float &offset) {
   const auto mSize = MONITOR->m_size * MONITOR->m_scale;
   const Vector2D center = {mSize.x / 2.0f, (mSize.y / 2.0f) + offset};
 
-  float baseAngle = ((2.0f * M_PI * index) / count) + rotation.current;
+  float baseAngle = rotation.current - ((2.0f * M_PI * index) / count);
   float warpScale = WARP + (1.0f - WINDOWSIZEINACTIVE) * 0.2f;
   float angle = baseAngle - warpScale * std::sin(2.0f * baseAngle);
 
-  float normAngle = fmod(angle, 2.0f * M_PI);
-  if (normAngle < 0)
-    normAngle += 2.0f * M_PI;
-  float dist = std::abs(normAngle - (M_PI / 2.0f));
-  if (dist > M_PI)
-    dist = (2.0f * M_PI) - dist;
+  float dist = std::abs(std::remainder(angle - (M_PI / 2.0f), 2.0f * M_PI));
 
   float z = std::sin(angle);
   float focusWeight = std::pow(std::max(0.0f, (float)(1.0f - (dist / (M_PI / 2.0f)))), 2.5f);
@@ -234,19 +228,11 @@ PHLWINDOW Monitor::select(int index) {
   if (count <= 0)
     return nullptr;
 
-  // very ugly..
-  windows[activeWindow]->isActive = false;
-  activeWindow = (index + count) % count;
-  windows[activeWindow]->isActive = true;
-
-  float angle = (M_PI / 2.0f) - ((2.0f * M_PI * activeWindow) / count);
+  activeWindow = (index % count + count) % count;
+  float angle = (M_PI / 2.0f) + ((2.0f * M_PI * activeWindow) / count);
   float diff = angle - rotation.target;
-
-  while (diff > M_PI)
-    diff -= 2.0f * M_PI;
-  while (diff < -M_PI)
-    diff += 2.0f * M_PI;
-
+  diff = std::remainder(diff, 2.0f * M_PI);
   rotation.set(rotation.target + diff, false);
+
   return windows[activeWindow]->window;
 }

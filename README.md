@@ -70,6 +70,7 @@ In `hyprland.conf`, under `plugin { alttab { ... } }`:
 | `monitor_animation_speed` | float    | `0.4`        | Monitor up/down animation speed, in seconds                                                        |
 | `include_special`         | bool     | `true`       | `1` = show special workspace windows; `0` = hide them                                              |
 | `bring_to_active`         | bool     | `false`      | Bring workspace with selected window to current monitor                                            |
+| `grace`         | int     | `100`      | Grace period before carousel shows (in ms)                                           |
 
 **Note:** _Hyprland.conf reloads on save by default._
 

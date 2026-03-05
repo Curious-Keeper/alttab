@@ -37,6 +37,8 @@ inline bool SPLITMONITOR = true;
 inline float MONITORSPACING = 0.3f;
 inline float MONITORANIMATIONSPEED = 0.4f;
 
+inline int GRACE = 100;
+
 using Timestamp = std::chrono::steady_clock::time_point;
 using DeltaTime = std::chrono::duration<long long, std::nano>;
 using FloatTime = std::chrono::duration<float>;

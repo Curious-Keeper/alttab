@@ -30,7 +30,7 @@ public:
   void prev();
   bool animate(const float delta, const bool active);
   void update(const float delta, const bool active);
-  void draw(const CRegion &damage, const float &offset, const bool active);
+  void draw(const CRegion &damage, const float &offset, const bool active, const float alpha);
   CardData getCardBox(int index, const float &offset);
   PHLWINDOW select(int card);
 

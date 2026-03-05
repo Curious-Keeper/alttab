@@ -189,6 +189,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:split_monitor", Hyprlang::INT{SPLITMONITOR});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::FLOAT{MONITORSPACING});
   HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_animation_speed", Hyprlang::FLOAT{MONITORANIMATIONSPEED});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:grace", Hyprlang::INT{GRACE});
 
   try {
     auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");

@@ -11,6 +11,7 @@ class Manager {
 public:
   Manager();
   void activate();
+  void init();
   void deactivate();
   void toggle();
   void confirm();
@@ -43,11 +44,13 @@ private:
   } listeners;
 
   SP<CEventLoopTimer> loopTimer;
+  SP<CEventLoopTimer> graceTimer;
 
   MONITORID activeMonitor = MONITOR_INVALID;
   Timestamp lastFrame;
   std::map<MONITORID, UP<Monitor>> monitors;
   AnimatedValue<float> monitorOffset;
+  AnimatedValue<float> monitorFade;
   Timestamp lastUpdate;
 };
 

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <hyprutils/math/Vector2D.hpp>
 #include <src/Compositor.hpp>
+#include <src/desktop/history/WindowHistoryTracker.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/helpers/Color.hpp>
 #include <src/helpers/Monitor.hpp>
@@ -58,7 +59,14 @@ void Manager::damageMonitors() {
 void Manager::activate() {
   LOG_SCOPE()
   active = true;
+  graceTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(GRACE), [this](SP<CEventLoopTimer> timer, void *data) { this->init(); }, nullptr);
+  g_pEventLoopManager->addTimer(graceTimer);
+  // g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
+}
+
+void Manager::init() {
   activeMonitor = Desktop::focusState()->monitor()->m_id;
+  monitorFade.set(1.0f, false);
   rebuild();
   loopTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(10), [this](SP<CEventLoopTimer> timer, void *data) {
     auto d = FloatTime(NOW - lastFrame).count();
@@ -67,16 +75,17 @@ void Manager::activate() {
     lastFrame = NOW;
     loopTimer->updateTimeout(std::chrono::milliseconds(16)); }, nullptr);
   g_pEventLoopManager->addTimer(loopTimer);
-  // g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
 }
 
 void Manager::deactivate() {
   LOG_SCOPE()
   active = false;
+  graceTimer->cancel();
   for (const auto &[id, mon] : monitors) {
     g_pHyprRenderer->damageMonitor(mon->monitor);
   }
   loopTimer.reset();
+  graceTimer.reset();
   monitors.clear();
 }
 
@@ -91,6 +100,18 @@ void Manager::toggle() {
 }
 
 void Manager::confirm() {
+  if (!monitors.contains(activeMonitor)) {
+    const auto history = Desktop::History::windowTracker()->fullHistory();
+    PHLWINDOWREF lastWindow;
+    if (history.size() >= 2) {
+      lastWindow = *(history | std::views::reverse | std::views::drop(1)).begin();
+    } else {
+      lastWindow = Desktop::focusState()->window();
+    }
+    Desktop::focusState()->fullWindowFocus(lastWindow.lock(), Desktop::FOCUS_REASON_KEYBIND);
+    deactivate();
+    return;
+  }
   const auto &mon = monitors[activeMonitor];
   if (!mon || mon->windows.empty()) {
     deactivate();
@@ -106,6 +127,7 @@ void Manager::confirm() {
 void Manager::update(float delta) {
   LOG_SCOPE()
   const auto MONITOR = Desktop::focusState()->monitor();
+  monitorFade.tick(delta, 0.4);
   monitorOffset.tick(delta, MONITORANIMATIONSPEED);
   for (const auto &[id, m] : monitors) {
     m->update(delta, id == activeMonitor);
@@ -117,25 +139,33 @@ void Manager::update(float delta) {
 }
 
 void Manager::up() {
-  activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
+  if (monitors.contains(activeMonitor))
+    activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
   monitorOffset.set(activeMonitor, false);
 }
 
 void Manager::down() {
-  activeMonitor = (activeMonitor + 1) % monitors.size();
+  if (monitors.contains(activeMonitor))
+    activeMonitor = (activeMonitor + 1) % monitors.size();
   monitorOffset.set(activeMonitor, false);
 }
 
 void Manager::next() {
-  monitors[activeMonitor]->next();
+  if (monitors.contains(activeMonitor))
+    monitors[activeMonitor]->next();
 }
 
 void Manager::prev() {
-  monitors[activeMonitor]->prev();
+  if (monitors.contains(activeMonitor))
+    monitors[activeMonitor]->prev();
 }
 
 void Manager::draw(MONITORID monid, const CRegion &damage) {
   LOG_SCOPE()
+
+  // probably not inited from grace yet.
+  if (monitors.empty())
+    return;
   const auto cur = Desktop::focusState()->monitor();
   auto dmg = damage;
 
@@ -152,7 +182,7 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
 #endif
 
     if (!SPLITMONITOR) {
-      monitors[monid]->draw(damage, 0, true);
+      monitors[monid]->draw(damage, 0, true, monitorFade.current);
     } else {
       const auto spacing = cur->m_size.y * MONITORSPACING;
       int i = 0;
@@ -163,7 +193,7 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
         }
 
         float offset = (i - monitorOffset.current) * spacing;
-        mon->draw(damage, offset, false);
+        mon->draw(damage, offset, false, monitorFade.current);
         i++;
       }
       int activeMon = 0;
@@ -176,7 +206,7 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
         counter++;
       }
       float activeOffset = (activeMon - monitorOffset.current) * spacing;
-      monitors[activeMonitor]->draw(damage, activeOffset, true);
+      monitors[activeMonitor]->draw(damage, activeOffset, true, monitorFade.current);
 #ifndef NDEBUG
       Overlay->add(std::format("monitor->m_size.x: {}, monitor->m_size.y: {}\nmonitor->m_pixelSize.x: {}, monitor->m_pixelSize.y: {}", monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y, monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y));
 #endif
@@ -215,6 +245,7 @@ void Manager::onConfigReload() {
   UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
   POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
   BRINGTOACTIVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:bring_to_active");
+  GRACE = *CConfigValue<Hyprlang::INT>("plugin:alttab:grace");
 }
 
 void Manager::onWindowCreated(PHLWINDOW window) {
@@ -276,17 +307,40 @@ void Manager::rebuild() {
     monitors[m->m_id] = makeUnique<Monitor>(m);
   }
 
-  auto activeWindow = Desktop::focusState()->window();
+  // auto activeWindow = Desktop::focusState()->window();
+  PHLWINDOWREF activeWindow;
+
+  const auto history = Desktop::History::windowTracker()->fullHistory();
+  if (history.size() >= 2) {
+    activeWindow = *(history | std::views::reverse | std::views::drop(1)).begin();
+  } else {
+    activeWindow = Desktop::focusState()->window();
+  }
   activeMonitor = Desktop::focusState()->monitor()->m_id;
   monitorOffset.snap(activeMonitor);
 
   for (auto &[monID, mon] : monitors) {
     std::vector<PHLWINDOW> monitorWindows;
-    for (const auto &w : g_pCompositor->m_windows) {
+
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+      auto w = it->lock();
+      if (!w)
+        continue;
+
       if (!INCLUDESPECIAL && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
         continue;
-      if (w->m_isMapped && w->m_monitor.lock() && (!SPLITMONITOR || w->m_monitor == mon->monitor))
+
+      if (w->m_isMapped && (!SPLITMONITOR || w->m_monitor.lock() == mon->monitor)) {
         monitorWindows.emplace_back(w);
+      }
+    }
+    // TODO: Find a better fallback in-case some window is in the history but not mapped..
+    for (const auto &w : g_pCompositor->m_windows) {
+      if (std::find(monitorWindows.begin(), monitorWindows.end(), w) == monitorWindows.end()) {
+        if (w->m_isMapped && (!SPLITMONITOR || w->m_monitor.lock() == mon->monitor)) {
+          monitorWindows.emplace_back(w);
+        }
+      }
     }
 
     for (const auto &w : monitorWindows) {
@@ -294,7 +348,7 @@ void Manager::rebuild() {
       if (w == activeWindow) {
         mon->activeWindow = mon->windows.size() - 1;
         const int count = monitorWindows.size();
-        const float angle = (M_PI / 2.0f) - ((2.0f * M_PI * mon->activeWindow) / count);
+        const float angle = (M_PI / 2.0f) + ((2.0f * M_PI * mon->activeWindow) / count);
         mon->rotation.snap(angle);
       }
     }
@@ -303,6 +357,7 @@ void Manager::rebuild() {
     // g_pCompositor->scheduleFrameForMonitor(mon->monitor);
   }
 }
+
 void RenderPass::draw(const CRegion &damage) {
   const auto MON = g_pHyprOpenGL->m_renderData.pMonitor;
   manager->draw(MON->m_id, damage);
