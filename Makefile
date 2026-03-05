@@ -26,4 +26,9 @@ install:
 uninstall:
 	hyprctl plugin unload ~/.config/hypr/plugins/$(TARGET).so
 
+clean:
+	rm -rf build
+	rm $(TARGET).so
+	rm compile_commands.json
+
 .PHONY: all release run trace debug
