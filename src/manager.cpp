@@ -346,14 +346,19 @@ void Manager::rebuild() {
         monitorWindows.emplace_back(w);
       }
     }
+    /*
     // TODO: Find a better fallback in-case some window is in the history but not mapped..
     for (const auto &w : g_pCompositor->m_windows) {
       if (std::find(monitorWindows.begin(), monitorWindows.end(), w) == monitorWindows.end()) {
+        if (!Config::includeSpecial && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
+          continue;
+
         if (w->m_isMapped && (!Config::splitMonitor || w->m_monitor.lock() == mon->monitor)) {
           monitorWindows.emplace_back(w);
         }
       }
     }
+    */
 
     for (const auto &w : monitorWindows) {
       auto card = mon->addWindow(w);
