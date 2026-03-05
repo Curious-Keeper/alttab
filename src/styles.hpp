@@ -49,3 +49,9 @@ public:
 private:
   const int cols = 4;
 };
+
+class Slide : public IStyle {
+public:
+  RenderData calculate(const StyleContext &ctx, const Vector2D &surfaceSize) const override;
+  MoveResult onMove(Direction dir, const size_t index, const size_t count) override;
+};

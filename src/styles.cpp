@@ -123,3 +123,47 @@ MoveResult Grid::onMove(Direction dir, const size_t index, const size_t count) {
 
   return {.index = (size_t)target};
 }
+
+RenderData Slide::calculate(const StyleContext &ctx, const Vector2D &surfaceSize) const {
+  const float aspect = (surfaceSize.y > 0) ? surfaceSize.x / surfaceSize.y : 1.77f;
+  const float activeH = ctx.mSize.y * Config::windowSizeActive * Config::windowSize;
+  const float inactiveH = activeH * Config::windowSizeInactive;
+  const float focusWeight = (ctx.index == ctx.activeIndex) ? 1.0f : 0.0f;
+  const float h = std::lerp(inactiveH, activeH, focusWeight * ctx.scale);
+  const Vector2D size = {h * aspect, h};
+
+  float stripIndex = (ctx.rotation - (M_PI / 2.0f)) / (2.0f * M_PI) * ctx.count;
+
+  const float spacing = 1.2f;
+  const float slotWidth = (inactiveH * aspect) * spacing;
+  float xOffset = ((float)ctx.index - stripIndex) * slotWidth;
+
+  const Vector2D center = {ctx.mSize.x / 2.0f, (ctx.mSize.y / 2.0f) + ctx.offset.y};
+  const Vector2D pos = {
+      center.x + xOffset - (size.x / 2.0f),
+      center.y - (size.y / 2.0f)};
+
+  const float finalAlpha = std::lerp(Config::unfocusedAlpha, 1.0f, focusWeight) * ctx.alpha;
+  const CBox box{pos, size};
+
+  return {
+      .visible = finalAlpha > 0.01f && box.overlaps({0, 0, ctx.mSize.x, ctx.mSize.y}),
+      .z = focusWeight,
+      .rotation = 0.0f,
+      .scale = h / activeH,
+      .alpha = std::clamp(finalAlpha, 0.0f, 1.0f),
+      .position = box};
+}
+
+MoveResult Slide::onMove(Direction dir, const size_t index, const size_t count) {
+  if (dir == Direction::UP || dir == Direction::DOWN)
+    return {.changeMonitor = true};
+
+  int step = (dir == Direction::LEFT) ? -1 : 1;
+  int target = index + step;
+
+  if (target < 0 || target >= count)
+    return {.index = index};
+
+  return {.index = target};
+}

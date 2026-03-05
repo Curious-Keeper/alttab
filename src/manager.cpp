@@ -72,6 +72,8 @@ bool Manager::setLayout() {
     layoutStyle = makeShared<Grid>();
   } else if (styleName == "carousel") {
     layoutStyle = makeShared<Carousel>();
+  } else if (styleName == "slide") {
+    layoutStyle = makeShared<Slide>();
   } else {
     layoutStyle = makeShared<Carousel>();
   }
