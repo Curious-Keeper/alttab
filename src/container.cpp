@@ -1,4 +1,5 @@
 #include "container.hpp"
+#include "defines.hpp"
 #include "helpers.hpp"
 #include <hyprutils/math/Vector2D.hpp>
 #include <src/desktop/state/FocusState.hpp>
@@ -50,9 +51,16 @@ void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.
 
   contentBox = box;
   contentBox.round();
-  contentBox = contentBox.expand(-BORDERSIZE);
+  contentBox = contentBox.expand(-Config::borderSize);
+  if (scale != 1.0f) {
+    Vector2D center = box.pos() + box.size() / 2.0f;
+    contentBox.width *= scale;
+    contentBox.height *= scale;
+    contentBox.x = center.x - contentBox.width / 2.0f;
+    contentBox.y = center.y - contentBox.height / 2.0f;
+  }
   const auto padding = 4;
-  const auto barHeight = (FONTSIZE + padding) * scale;
+  const auto barHeight = (Config::fontSize + padding) * scale;
   titleBox = {contentBox.x, contentBox.y, contentBox.width, barHeight};
   previewBox = {contentBox.x, contentBox.y + barHeight, contentBox.width, contentBox.height - barHeight};
   /* Maybe..
@@ -148,9 +156,9 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 
   if (window->m_title != title) {
     title = window->m_title;
-    int maxChars = std::max(5.0f, (float)((baseWidth - padding) / (FONTSIZE * 0.55f)));
+    int maxChars = std::max(5.0f, (float)((baseWidth - padding) / (Config::fontSize * 0.55f)));
     std::string displayTitle = middleTruncate(title, maxChars);
-    titleTexture = g_pHyprOpenGL->renderText(displayTitle, CHyprColor(1.0, 1.0, 1.0, 1.0), FONTSIZE);
+    titleTexture = g_pHyprOpenGL->renderText(displayTitle, CHyprColor(1.0, 1.0, 1.0, 1.0), Config::fontSize);
   }
 
   g_pHyprOpenGL->renderRect(titleBox, CHyprColor(0.0, 0.0, 0.0, 0.8 * alpha), {});
@@ -164,5 +172,5 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 }
 
 void WindowCard::drawBorder(const float alpha) {
-  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = BORDERROUNDING, .roundingPower = BORDERROUNDINGPOWER, .borderSize = BORDERSIZE, .a = alpha});
+  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *Config::activeBorderColor : *Config::inactiveBorderColor, {.round = (int)Config::borderRounding, .roundingPower = Config::borderRoundingPower, .borderSize = (int)Config::borderSize, .a = alpha});
 }

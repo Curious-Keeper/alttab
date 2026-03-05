@@ -1,0 +1,129 @@
+#include "styles.hpp"
+#include "defines.hpp"
+#include <hyprutils/math/Vector2D.hpp>
+#include <src/desktop/state/FocusState.hpp>
+#include <src/helpers/Monitor.hpp>
+
+RenderData Carousel::calculate(const StyleContext &ctx, const Vector2D &surfaceSize) const {
+  const Vector2D center = {ctx.mSize.x / 2.0f, (ctx.mSize.y / 2.0f) + ctx.offset.y};
+
+  const float baseAngle = ctx.rotation - ((2.0f * M_PI * ctx.index) / ctx.count);
+  const float warpScale = Config::warp + (1.0f - Config::windowSizeInactive) * 0.2f;
+  const float angle = baseAngle - warpScale * std::sin(2.0f * baseAngle);
+
+  const float dist = std::abs(std::remainder(angle - (M_PI / 2.0f), 2.0f * M_PI));
+  const float z = std::sin(angle);
+
+  const float focusWeight = std::pow(std::max(0.0f, 1.0f - (float)(dist / (M_PI / 2.0f))), 2.5f);
+  const float depthScale = std::lerp(Config::windowSizeInactive, 1.0f, (z + 1.0f) / 2.0f);
+  const float scale = depthScale * std::lerp(1.0f, Config::windowSizeActive, focusWeight * ctx.scale);
+
+  const float aspect = (surfaceSize.y > 0) ? surfaceSize.x / surfaceSize.y : 1.77f;
+  Vector2D size = {ctx.mSize.y * Config::windowSize * aspect * scale, ctx.mSize.y * Config::windowSize * scale};
+
+  if (size.x > ctx.mSize.x * Config::windowSize * 1.5f) {
+    size.x = ctx.mSize.x * Config::windowSize * 1.5f;
+    size.y = size.x / aspect;
+  }
+
+  const float radius = (ctx.mSize.x * 0.5f) * Config::carouselSize;
+  const float radiusScale = radius * std::lerp(0.85f, 1.0f, (z + 1.0f) / 2.0f);
+  const float tiltOffset = radius * std::sin(Config::tilt * (M_PI / 180.0f));
+
+  const Vector2D pos = {
+      center.x + (radiusScale * 1.4f) * std::cos(angle) - (size.x / 2.0f),
+      (center.y - tiltOffset) - (z * -tiltOffset) - (size.y / 2.0f)};
+
+  const float alphaWeight = std::pow(std::max(0.0f, 1.0f - (float)(dist / (M_PI / 1.25f))), 2.0f);
+  const float baseline = std::lerp(0.0f, Config::unfocusedAlpha, ctx.alpha);
+  const float finalAlpha = std::lerp(baseline + (z + 1.0f) * 0.2f, 1.0f, alphaWeight) * std::lerp(0.5f, 1.0f, ctx.alpha);
+
+  const CBox box{pos, size};
+  const bool isVisible = finalAlpha > 0.01f && box.overlaps({0, 0, ctx.mSize.x, ctx.mSize.y});
+
+  return {
+      .visible = isVisible,
+      .z = z + (alphaWeight * 0.1f),
+      .rotation = angle,
+      .scale = scale,
+      .alpha = std::clamp(finalAlpha, 0.0f, 1.0f),
+      .position = box};
+}
+
+MoveResult Carousel::onMove(Direction dir, const size_t index, const size_t count) {
+  if (dir == Direction::UP || dir == Direction::DOWN)
+    return {.changeMonitor = true};
+  int step = (dir == Direction::LEFT) ? -1 : 1;
+  // undef mod behavior?
+  return {.index = (size_t)((int)index + step + (int)count) % count};
+}
+
+RenderData Grid::calculate(const StyleContext &ctx, const Vector2D &surfaceSize) const {
+  const int rows = (ctx.count + cols - 1) / cols;
+
+  const auto slotW = ctx.mSize.x / cols;
+  const auto slotH = ctx.mSize.y / rows;
+  const auto aspect = (surfaceSize.y > 0) ? surfaceSize.x / surfaceSize.y : 1.77f;
+  const auto scale = (ctx.index == ctx.activeIndex) ? Config::windowSizeActive : Config::windowSizeInactive;
+
+  float w = slotW;
+  float h = w / aspect;
+
+  if (h > slotH) {
+    h = slotH;
+    w = h * aspect;
+  }
+
+  const float x = (ctx.index % cols) * slotW + (slotW - w) / 2.0f;
+  const float y = (int)(ctx.index / cols) * slotH + (slotH - h) / 2.0f + ctx.offset.y;
+
+  Vector2D pos = {
+      std::clamp(x, 0.0f, (float)ctx.mSize.x - w),
+      std::clamp(y, 0.0f, (float)std::max(ctx.mSize.y, (float)rows * slotH) - h)};
+
+  return {
+      .visible = true,
+      .z = (ctx.index == ctx.activeIndex) ? 1.0f : 0.0f,
+      .rotation = 0.0f,
+      .scale = ctx.scale * scale,
+      .alpha = ctx.alpha,
+      .position = CBox{pos, {w, h}}};
+}
+
+MoveResult Grid::onMove(Direction dir, const size_t index, const size_t count) {
+  const int rows = (count + cols - 1) / cols;
+  int curRow = index / cols;
+  int curCol = index % cols;
+
+  switch (dir) {
+  case Direction::UP:
+    curRow -= 1;
+    if (curRow < 0)
+      return {.changeMonitor = true};
+    break;
+  case Direction::DOWN:
+    curRow += 1;
+    if (curRow >= rows)
+      return {.changeMonitor = true};
+    break;
+  case Direction::LEFT:
+    curCol -= 1;
+    if (curCol < 0)
+      curCol = cols - 1;
+    break;
+  case Direction::RIGHT:
+    curCol += 1;
+    if (curCol >= cols)
+      curCol = 0;
+    break;
+  default:
+    break;
+  }
+
+  int target = curRow * cols + curCol;
+
+  if (target >= (int)count)
+    target = (int)count - 1;
+
+  return {.index = (size_t)target};
+}

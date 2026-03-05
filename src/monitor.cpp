@@ -1,5 +1,6 @@
 #include "monitor.hpp"
 #include "defines.hpp"
+#include "manager.hpp"
 #include <src/Compositor.hpp>
 #include <src/desktop/state/FocusState.hpp>
 #include <src/desktop/view/Window.hpp>
@@ -78,9 +79,9 @@ void Monitor::renderTexture(const CRegion &damage) {
     if (DIMENABLED)
     g_pHyprOpenGL->renderRect(dmg.getExtents(), {0, 0, 0, DIMAMOUNT}, {});
   */
-  if (BLURBG)
+  if (Config::blurBG)
     g_pHyprOpenGL->renderTexture(blurred, box, {});
-  else if (POWERSAVE)
+  else if (Config::powersave)
     g_pHyprOpenGL->renderTexture(texture, box, {});
 }
 
@@ -95,36 +96,34 @@ size_t Monitor::removeWindow(PHLWINDOW window) {
   });
   return windows.size();
 }
-void Monitor::next() {
-  select(activeWindow + 1);
-}
-void Monitor::prev() {
-  select(activeWindow - 1);
-}
 
-bool Monitor::animate(const float delta, const bool active) {
+bool Monitor::animate(const float delta) {
+  const auto active = isActive();
   zoom.set(active ? 1.0f : 0.0f, false);
   alpha.set(active ? 1.0f : 0.0f, false);
-  rotation.tick(delta, ROTATIONSPEED);
-  zoom.tick(delta, MONITORANIMATIONSPEED);
-  alpha.tick(delta, MONITORANIMATIONSPEED);
+  rotation.tick(delta, Config::rotationSpeed);
+  zoom.tick(delta, Config::monitorAnimationSpeed);
+  alpha.tick(delta, Config::monitorAnimationSpeed);
   return !rotation.done() || !zoom.done() || !alpha.done();
 }
 
-void Monitor::update(const float delta, const bool active) {
+void Monitor::update(const float delta) {
   const auto MONITOR = Desktop::focusState()->monitor();
   const Vector2D mSize = MONITOR->m_size * MONITOR->m_scale;
 
-  bool damage = animate(delta, active);
+  bool damage = animate(delta);
 
   renderTasks.clear();
-  for (int i = 0; i < windows.size(); ++i) {
-    auto data = getCardBox(i, 0.0f);
+  for (size_t i = 0; i < windows.size(); ++i) {
+    auto ctx = StyleContext{i, windows.size(), activeWindow, rotation.current, zoom.current, alpha.current, mSize, {0, 0}};
+    auto surfaceSize = windows[i]->window->wlSurface()->getSurfaceBoxGlobal().value_or(CBox{0, 0, 0, 0}).size();
+    auto data = manager->layoutStyle->calculate(ctx, surfaceSize);
 
+    // TODO: get rid of this and do proper depth and clip
     const auto padding = 4;
-    const auto barHeight = (FONTSIZE + padding) * data.scale;
-    double pX1 = data.box.x, pY1 = data.box.y + barHeight;
-    double pW = data.box.width, pH = data.box.height - barHeight;
+    const auto barHeight = (Config::fontSize + padding) * data.scale;
+    double pX1 = data.position.x, pY1 = data.position.y + barHeight;
+    double pW = data.position.width, pH = data.position.height - barHeight;
 
     double interW = std::max(0.0, std::min(mSize.x, pX1 + pW) - std::max(0.0, pX1));
     double interH = std::max(0.0, std::min(mSize.y, pY1 + pH) - std::max(0.0, pY1));
@@ -146,7 +145,7 @@ void Monitor::update(const float delta, const bool active) {
     if (task->visibility > 0.10f && (!task->card->ready || task->since > 0.5f)) {
       if (snapshotsDone < 2) {
         task->card->requestFrame(MONITOR);
-        task->card->snapshot(mSize * WINDOWSIZE);
+        task->card->snapshot(mSize * Config::windowSize);
         snapshotsDone++;
         damage = true;
       }
@@ -156,7 +155,7 @@ void Monitor::update(const float delta, const bool active) {
   animating = damage;
 }
 
-void Monitor::draw(const CRegion &damage, const float &offset, const bool active, const float alpha = 1.0f) {
+void Monitor::draw(const CRegion &damage, const float &offset, const float alpha = 1.0f) {
   if (renderTasks.empty())
     return;
 
@@ -165,9 +164,11 @@ void Monitor::draw(const CRegion &damage, const float &offset, const bool active
     return a.data.z < b.data.z;
   });
 
+  auto dmg = damage;
   for (const auto &task : renderTasks) {
-    auto box = task.data.box;
+    auto box = task.data.position;
     box.translate({0.0f, offset});
+    dmg = dmg.intersect(box);
     task.card->draw(box, task.data.scale, std::min(task.data.alpha, alpha));
   }
 #ifndef NDEBUG
@@ -176,63 +177,19 @@ void Monitor::draw(const CRegion &damage, const float &offset, const bool active
 #endif
 }
 
-Monitor::CardData Monitor::getCardBox(int index, const float &offset) {
-  const int count = windows.size();
-  if (index < 0 || index >= count)
-    return {};
-
-  const auto MONITOR = Desktop::focusState()->monitor();
-  const auto mSize = MONITOR->m_size * MONITOR->m_scale;
-  const Vector2D center = {mSize.x / 2.0f, (mSize.y / 2.0f) + offset};
-
-  float baseAngle = rotation.current - ((2.0f * M_PI * index) / count);
-  float warpScale = WARP + (1.0f - WINDOWSIZEINACTIVE) * 0.2f;
-  float angle = baseAngle - warpScale * std::sin(2.0f * baseAngle);
-
-  float dist = std::abs(std::remainder(angle - (M_PI / 2.0f), 2.0f * M_PI));
-
-  float z = std::sin(angle);
-  float focusWeight = std::pow(std::max(0.0f, (float)(1.0f - (dist / (M_PI / 2.0f)))), 2.5f);
-  float depthScale = std::lerp(WINDOWSIZEINACTIVE, 1.0f, (z + 1.0f) / 2.0f);
-  float scale = depthScale * std::lerp(1.0f, WINDOWSIZEACTIVE, focusWeight * zoom.current);
-
-  auto surfaceSize = windows[index]->window->wlSurface()->getSurfaceBoxGlobal().value_or(CBox{0, 0, 0, 0}).size();
-  float aspect = (surfaceSize.y > 0) ? (float)surfaceSize.x / surfaceSize.y : 1.77f;
-
-  Vector2D size = {mSize.y * WINDOWSIZE * aspect * scale, mSize.y * WINDOWSIZE * scale};
-  if (size.x > mSize.x * WINDOWSIZE * 1.5f) {
-    size.x = mSize.x * WINDOWSIZE * 1.5f;
-    size.y = size.x / aspect;
-  }
-
-  float radius = (mSize.x * 0.5f) * CAROUSELSIZE;
-  float radiusScale = radius * std::lerp(0.85f, 1.0f, (z + 1.0f) / 2.0f);
-  float tiltOffset = radius * std::sin(TILT * (M_PI / 180.0f));
-
-  Vector2D pos = {
-      center.x + (radiusScale * 1.4f) * std::cos(angle) - (size.x / 2.0f),
-      (center.y - tiltOffset) - (z * -tiltOffset) - (size.y / 2.0f)};
-
-  float alphaWeight = std::pow(std::max(0.0f, (float)(1.0f - (dist / (M_PI / 1.25f)))), 2.0f);
-  float baseline = std::lerp(0.0f, UNFOCUSEDALPHA, alpha.current);
-  float finalAlpha = std::lerp(baseline + (z + 1.0f) * 0.2f, 1.0f, alphaWeight) * std::lerp(0.5f, 1.0f, alpha.current);
-
-  CBox box{pos, size};
-  bool isVisible = finalAlpha > 0.01f && box.overlaps({0, 0, mSize.x, mSize.y});
-
-  return {box, scale, std::clamp(finalAlpha, 0.0f, 1.0f), z + (alphaWeight * 0.1f), isVisible};
-}
-
-PHLWINDOW Monitor::select(int index) {
+void Monitor::activeChanged() {
   const int count = windows.size();
   if (count <= 0)
-    return nullptr;
+    return;
 
-  activeWindow = (index % count + count) % count;
-  float angle = (M_PI / 2.0f) + ((2.0f * M_PI * activeWindow) / count);
-  float diff = angle - rotation.target;
+  // Why am i doing this backwards??
+  const auto target = (M_PI / 2) + (M_PI * 2.0f * activeWindow) / count;
+  auto diff = target - rotation.target;
   diff = std::remainder(diff, 2.0f * M_PI);
-  rotation.set(rotation.target + diff, false);
 
-  return windows[activeWindow]->window;
+  rotation.set(rotation.target + diff, false);
+}
+
+bool Monitor::isActive() const {
+  return manager->activeMonitor == monitor->m_id;
 }

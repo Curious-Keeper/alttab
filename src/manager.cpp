@@ -1,5 +1,6 @@
 #include "manager.hpp"
 #include "defines.hpp"
+#include "helpers.hpp"
 #include <aquamarine/output/Output.hpp>
 #include <chrono>
 #include <hyprutils/math/Vector2D.hpp>
@@ -59,9 +60,22 @@ void Manager::damageMonitors() {
 void Manager::activate() {
   LOG_SCOPE()
   active = true;
-  graceTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(GRACE), [this](SP<CEventLoopTimer> timer, void *data) { this->init(); }, nullptr);
+  graceTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(Config::grace), [this](SP<CEventLoopTimer> timer, void *data) { this->init(); }, nullptr);
   g_pEventLoopManager->addTimer(graceTimer);
   // g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
+}
+
+bool Manager::setLayout() {
+  std::string styleName = toLower(Config::style);
+
+  if (styleName == "grid") {
+    layoutStyle = makeShared<Grid>();
+  } else if (styleName == "carousel") {
+    layoutStyle = makeShared<Carousel>();
+  } else {
+    layoutStyle = makeShared<Carousel>();
+  }
+  return (layoutStyle != nullptr);
 }
 
 void Manager::init() {
@@ -118,7 +132,7 @@ void Manager::confirm() {
     return;
   }
   auto selected = mon->windows[mon->activeWindow]->window;
-  if (BRINGTOACTIVE)
+  if (Config::bringToActive)
     g_pKeybindManager->m_dispatchers["focusworkspaceoncurrentmonitor"](selected->m_workspace->m_name);
   Desktop::focusState()->fullWindowFocus(selected, Desktop::FOCUS_REASON_KEYBIND);
   deactivate();
@@ -128,9 +142,9 @@ void Manager::update(float delta) {
   LOG_SCOPE()
   const auto MONITOR = Desktop::focusState()->monitor();
   monitorFade.tick(delta, 0.4);
-  monitorOffset.tick(delta, MONITORANIMATIONSPEED);
+  monitorOffset.tick(delta, Config::monitorAnimationSpeed);
   for (const auto &[id, m] : monitors) {
-    m->update(delta, id == activeMonitor);
+    m->update(delta);
     if (m->animating || !monitorOffset.done()) {
       // God i'm stupid sometimes. Ofc only damage the active monitor or animations will be fucked.
       g_pHyprRenderer->damageMonitor(MONITOR);
@@ -138,26 +152,23 @@ void Manager::update(float delta) {
   }
 }
 
-void Manager::up() {
-  if (monitors.contains(activeMonitor))
-    activeMonitor = (activeMonitor - 1 + monitors.size()) % monitors.size();
-  monitorOffset.set(activeMonitor, false);
-}
+void Manager::move(Direction dir) {
+  if (!monitors.contains(activeMonitor))
+    return;
 
-void Manager::down() {
-  if (monitors.contains(activeMonitor))
-    activeMonitor = (activeMonitor + 1) % monitors.size();
-  monitorOffset.set(activeMonitor, false);
-}
+  auto &mon = monitors[activeMonitor];
+  const auto res = layoutStyle->onMove(dir, mon->activeWindow, mon->windows.size());
 
-void Manager::next() {
-  if (monitors.contains(activeMonitor))
-    monitors[activeMonitor]->next();
-}
+  if (res.index.has_value()) {
+    mon->activeWindow = res.index.value();
+    mon->activeChanged();
+  } else if (res.changeMonitor) {
+    int step = (dir == Direction::UP) ? 1 : -1;
+    activeMonitor = (activeMonitor + step + monitors.size()) % monitors.size();
+    monitorOffset.set(activeMonitor, false);
+  }
 
-void Manager::prev() {
-  if (monitors.contains(activeMonitor))
-    monitors[activeMonitor]->prev();
+  damageMonitors();
 }
 
 void Manager::draw(MONITORID monid, const CRegion &damage) {
@@ -169,8 +180,8 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
   const auto cur = Desktop::focusState()->monitor();
   auto dmg = damage;
 
-  if (!POWERSAVE) {
-    g_pHyprOpenGL->renderRect(dmg.getExtents(), CHyprColor(0.0, 0.0, 0.0, (DIMENABLED) ? DIMAMOUNT : 0), {.blur = sc<bool>(BLURBG)});
+  if (!Config::powersave) {
+    g_pHyprOpenGL->renderRect(dmg.getExtents(), CHyprColor(0.0, 0.0, 0.0, (Config::dimEnabled) ? Config::dimAmount : 0), {.blur = sc<bool>(Config::blurBG)});
   } else {
     if (monitors.contains(monid))
       monitors[monid]->renderTexture(damage);
@@ -181,10 +192,10 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
     Overlay->add(std::format("ActiveInternal: {}, ActiveInFocus: {}, monid: {}", activeMonitor, cur->m_name, monid));
 #endif
 
-    if (!SPLITMONITOR) {
-      monitors[monid]->draw(damage, 0, true, monitorFade.current);
+    if (!Config::splitMonitor) {
+      monitors[monid]->draw(damage, 0, monitorFade.current);
     } else {
-      const auto spacing = cur->m_size.y * MONITORSPACING;
+      const auto spacing = cur->m_size.y * Config::monitorSpacing;
       int i = 0;
       for (const auto &[id, mon] : monitors) {
         if (id == activeMonitor) {
@@ -193,7 +204,7 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
         }
 
         float offset = (i - monitorOffset.current) * spacing;
-        mon->draw(damage, offset, false, monitorFade.current);
+        mon->draw(damage, offset, monitorFade.current);
         i++;
       }
       int activeMon = 0;
@@ -206,7 +217,7 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
         counter++;
       }
       float activeOffset = (activeMon - monitorOffset.current) * spacing;
-      monitors[activeMonitor]->draw(damage, activeOffset, true, monitorFade.current);
+      monitors[activeMonitor]->draw(damage, activeOffset, monitorFade.current);
 #ifndef NDEBUG
       Overlay->add(std::format("monitor->m_size.x: {}, monitor->m_size.y: {}\nmonitor->m_pixelSize.x: {}, monitor->m_pixelSize.y: {}", monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y, monitors[activeMonitor]->monitor->m_size.x, monitors[activeMonitor]->monitor->m_size.y));
 #endif
@@ -219,33 +230,13 @@ void Manager::draw(MONITORID monid, const CRegion &damage) {
 }
 
 void Manager::onConfigReload() {
-  FONTSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:font_size");
-  BORDERSIZE = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_size");
-  BORDERROUNDING = *CConfigValue<Hyprlang::INT>("plugin:alttab:border_rounding");
-  BORDERROUNDINGPOWER = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:border_rounding_power");
+#define X(type, name, conf, def) \
+  Config::name = *CConfigValue<Hyprlang::type>("plugin:alttab:" conf);
+  CONFIG_VARS
+#undef X
 
-  ACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
-  INACTIVEBORDERCOLOR = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
-
-  DIMENABLED = *CConfigValue<Hyprlang::INT>("plugin:alttab:dim");
-  DIMAMOUNT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:dim_amount");
-  BLURBG = *CConfigValue<Hyprlang::INT>("plugin:alttab:blur");
-  UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
-  POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
-  ROTATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:animation_speed");
-  CAROUSELSIZE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:carousel_size");
-  WINDOWSIZE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size");
-  WARP = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:warp");
-  TILT = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:tilt");
-  WINDOWSIZEACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_active");
-  WINDOWSIZEINACTIVE = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:window_size_inactive");
-  MONITORSPACING = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_spacing");
-  MONITORANIMATIONSPEED = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:monitor_animation_speed");
-  SPLITMONITOR = *CConfigValue<Hyprlang::INT>("plugin:alttab:split_monitor");
-  UNFOCUSEDALPHA = *CConfigValue<Hyprlang::FLOAT>("plugin:alttab:unfocused_alpha");
-  POWERSAVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:powersave");
-  BRINGTOACTIVE = *CConfigValue<Hyprlang::INT>("plugin:alttab:bring_to_active");
-  GRACE = *CConfigValue<Hyprlang::INT>("plugin:alttab:grace");
+  Config::activeBorderColor = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_active")->getValue()));
+  Config::inactiveBorderColor = rc<CGradientValueData *>(std::any_cast<void *>(HyprlandAPI::getConfigValue(PHANDLE, "plugin:alttab:border_inactive")->getValue()));
 }
 
 void Manager::onWindowCreated(PHLWINDOW window) {
@@ -298,9 +289,7 @@ void Manager::onFocusChange(PHLMONITOR monitor) {
 
 void Manager::rebuild() {
   LOG_SCOPE()
-
-  const auto INCLUDESPECIAL = *CConfigValue<Hyprlang::INT>("plugin:alttab:include_special");
-
+  setLayout();
   for (const auto &m : g_pCompositor->m_monitors) {
     if (!m->m_enabled || m->m_isUnsafeFallback)
       continue;
@@ -327,17 +316,17 @@ void Manager::rebuild() {
       if (!w)
         continue;
 
-      if (!INCLUDESPECIAL && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
+      if (!Config::includeSpecial && w->m_workspace && w->m_workspace->m_isSpecialWorkspace)
         continue;
 
-      if (w->m_isMapped && (!SPLITMONITOR || w->m_monitor.lock() == mon->monitor)) {
+      if (w->m_isMapped && (!Config::splitMonitor || w->m_monitor.lock() == mon->monitor)) {
         monitorWindows.emplace_back(w);
       }
     }
     // TODO: Find a better fallback in-case some window is in the history but not mapped..
     for (const auto &w : g_pCompositor->m_windows) {
       if (std::find(monitorWindows.begin(), monitorWindows.end(), w) == monitorWindows.end()) {
-        if (w->m_isMapped && (!SPLITMONITOR || w->m_monitor.lock() == mon->monitor)) {
+        if (w->m_isMapped && (!Config::splitMonitor || w->m_monitor.lock() == mon->monitor)) {
           monitorWindows.emplace_back(w);
         }
       }
@@ -356,6 +345,10 @@ void Manager::rebuild() {
     // damageMonitor should do this??
     // g_pCompositor->scheduleFrameForMonitor(mon->monitor);
   }
+}
+
+bool Manager::isActive() const {
+  return active;
 }
 
 void RenderPass::draw(const CRegion &damage) {

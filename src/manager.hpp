@@ -1,5 +1,6 @@
 #pragma once
 #include "monitor.hpp"
+#include "styles.hpp"
 #include <map>
 #include <src/SharedDefs.hpp>
 #include <src/helpers/time/Timer.hpp>
@@ -15,16 +16,16 @@ public:
   void deactivate();
   void toggle();
   void confirm();
+  void move(Direction dir);
   void update(float delta);
-  void up();
-  void down();
-  void next();
-  void prev();
   void rebuild();
   void draw(MONITORID monid, const CRegion &damage);
   void damageMonitors();
+  bool isActive() const;
 
+protected:
   bool active = false;
+  MONITORID activeMonitor = MONITOR_INVALID;
 
 private:
   void onConfigReload();
@@ -32,6 +33,8 @@ private:
   void onWindowDestroyed(PHLWINDOW window);
   void onRender(eRenderStage stage);
   void onFocusChange(PHLMONITOR monitor);
+
+  bool setLayout();
 
   struct {
     CHyprSignalListener config;
@@ -46,12 +49,14 @@ private:
   SP<CEventLoopTimer> loopTimer;
   SP<CEventLoopTimer> graceTimer;
 
-  MONITORID activeMonitor = MONITOR_INVALID;
   Timestamp lastFrame;
   std::map<MONITORID, UP<Monitor>> monitors;
   AnimatedValue<float> monitorOffset;
   AnimatedValue<float> monitorFade;
   Timestamp lastUpdate;
+  SP<IStyle> layoutStyle;
+
+  friend class Monitor;
 };
 
 inline UP<Manager> manager;
