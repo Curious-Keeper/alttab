@@ -185,6 +185,10 @@ void Monitor::activeChanged() {
   if (count <= 0)
     return;
 
+  for (auto i = 0; i < windows.size(); ++i) {
+    windows[i]->isActive = (i == activeWindow);
+  }
+
   // Why am i doing this backwards??
   const auto target = (M_PI / 2) + (M_PI * 2.0f * activeWindow) / count;
   auto diff = target - rotation.target;
