@@ -7,11 +7,10 @@ get_filename_component(PROJECT_NAME_FROM_DIR
 
 set(PROJECT_AUTHOR "Ergon")
 
-project(${PROJECT_NAME_FROM_DIR}
+project(alttab
     DESCRIPTION "Alttab carousel preview thing"
-    VERSION 0.3.0
+    VERSION 0.3.1
 )
-
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -45,6 +44,13 @@ add_library(${PROJECT_NAME} SHARED ${SRC})
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(hyprland REQUIRED IMPORTED_TARGET hyprland)
+
+if(hyprland_VERSION VERSION_GREATER_EQUAL "0.54.0")
+  message(STATUS "Hyprland >= 0.54.0 detected — using new EventBus API")
+else()
+  message(STATUS "Hyprland < 0.54.0 detected — using legacy HookSystem API")
+  target_compile_definitions(${PROJECT_NAME} PRIVATE HYPRLAND_LEGACY)
+endif()
 
 if(ENABLE_PROTOCOLS)
   pkg_check_modules(hyprwire REQUIRED IMPORTED_TARGET hyprwire)

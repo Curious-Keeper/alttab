@@ -1,12 +1,7 @@
 #include "defines.hpp"
 #include "manager.hpp"
-#include <src/Compositor.hpp>
-#include <src/SharedDefs.hpp>
 #include <src/desktop/state/FocusState.hpp>
-#include <src/helpers/Color.hpp>
 #include <src/managers/input/InputManager.hpp>
-#include <src/plugins/HookSystem.hpp>
-#include <src/plugins/PluginAPI.hpp>
 #include <src/render/Renderer.hpp>
 
 CFunctionHook *keyhookfn = nullptr;
@@ -19,14 +14,14 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
   auto e = std::any_cast<IKeyboard::SKeyEvent>(event);
   const auto MODS = g_pInputManager->getModsFromAllKBs();
 
-  if (!manager->active && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+  if (!manager->isActive() && e.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
     if (e.keycode == 15 && (MODS & HL_MODIFIER_ALT)) {
       manager->activate();
       return false;
     }
   }
 
-  if (!manager->active)
+  if (!manager->isActive())
     return ((CKeybindManager_onKeyEvent)keyhookfn->m_original)(self, event, pKeyboard);
 
   const auto KEYSYM = xkb_state_key_get_one_sym(pKeyboard->m_xkbState, e.keycode + 8);
@@ -37,22 +32,22 @@ static bool onKeyEvent(void *self, std::any event, SP<IKeyboard> pKeyboard) {
     case XKB_KEY_ISO_Left_Tab:
     case XKB_KEY_d:
     case XKB_KEY_Right:
-      (MODS & HL_MODIFIER_SHIFT) ? manager->prev() : manager->next();
+      manager->move((MODS & HL_MODIFIER_SHIFT) ? Direction::LEFT : Direction::RIGHT);
       break;
 
     case XKB_KEY_Down:
     case XKB_KEY_s:
-      manager->down();
+      manager->move(Direction::DOWN);
       break;
 
     case XKB_KEY_a:
     case XKB_KEY_Left:
-      manager->prev();
+      manager->move((MODS & HL_MODIFIER_SHIFT) ? Direction::RIGHT : Direction::LEFT);
       break;
 
     case XKB_KEY_w:
     case XKB_KEY_Up:
-      manager->up();
+      manager->move(Direction::UP);
       break;
 
     case XKB_KEY_Return:
@@ -142,6 +137,16 @@ inline void configHandleGradientDestroy(void **data) {
     delete sc<CGradientValueData *>(*data);
 }
 
+void registerConfig() {
+#define X(type, name, conf, def) \
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:" conf, Hyprlang::type{def});
+  CONFIG_VARS
+#undef X
+
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
+  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
+}
+
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
   return HYPRLAND_API_VERSION;
 }
@@ -151,49 +156,27 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     throw std::runtime_error("Version mismatch");
 
   manager = makeUnique<Manager>();
+  /* Maybe later.
+    HyprlandAPI::addDispatcherV2(PHANDLE, "alttab", [&](std::string args) -> SDispatchResult {
+      LOG_SCOPE()
+      manager->toggle();
+      g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
+      return {};
+    });
 
-  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab", [&](std::string args) -> SDispatchResult {
-    LOG_SCOPE()
-    manager->toggle();
-    g_pHyprRenderer->damageMonitor(Desktop::focusState()->monitor());
-    return {};
-  });
+    HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-next", [&](std::string args) -> SDispatchResult {
+      if (manager->active)
+        manager->next();
+      return {};
+    });
+    HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-prev", [&](std::string args) -> SDispatchResult {
+      if (manager->active)
+        manager->prev();
+      return {};
+    });
+    */
 
-  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-next", [&](std::string args) -> SDispatchResult {
-    if (manager->active)
-      manager->next();
-    return {};
-  });
-  HyprlandAPI::addDispatcherV2(PHANDLE, "alttab-prev", [&](std::string args) -> SDispatchResult {
-    if (manager->active)
-      manager->prev();
-    return {};
-  });
-
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:font_size", Hyprlang::INT{24});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_size", Hyprlang::INT{1});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding", Hyprlang::INT{0});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_rounding_power", Hyprlang::FLOAT{2});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_active", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xff00ccdd"});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:border_inactive", Hyprlang::CConfigCustomValueType{&configHandleGradientSet, &configHandleGradientDestroy, "0xaabbccddff"});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:animation_speed", Hyprlang::FLOAT{ROTATIONSPEED});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:include_special", Hyprlang::INT{1});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:blur", Hyprlang::INT{BLURBG});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:unfocused_alpha", Hyprlang::FLOAT{UNFOCUSEDALPHA});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim", Hyprlang::INT{DIMENABLED});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:dim_amount", Hyprlang::FLOAT{DIMAMOUNT});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:powersave", Hyprlang::INT{POWERSAVE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:carousel_size", Hyprlang::FLOAT{CAROUSELSIZE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size", Hyprlang::FLOAT{WINDOWSIZE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_active", Hyprlang::FLOAT{WINDOWSIZEACTIVE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:window_size_inactive", Hyprlang::FLOAT{WINDOWSIZEINACTIVE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:warp", Hyprlang::FLOAT{WARP});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:tilt", Hyprlang::FLOAT{TILT});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:bring_to_active", Hyprlang::INT{BRINGTOACTIVE});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:split_monitor", Hyprlang::INT{SPLITMONITOR});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_spacing", Hyprlang::FLOAT{MONITORSPACING});
-  HyprlandAPI::addConfigValue(PHANDLE, "plugin:alttab:monitor_animation_speed", Hyprlang::FLOAT{MONITORANIMATIONSPEED});
+  registerConfig();
 
   try {
     auto keyhooklookup = HyprlandAPI::findFunctionsByName(PHANDLE, "onKeyEvent");
@@ -202,8 +185,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", f.address, f.signature, f.demangled);
       throw std::runtime_error("CKeybindManager::onKeyEvent not found");
     }
-    Log::logger->log(Log::ERR, "onKeyEvent found at {} :: sig: {}, demangled: {}", keyhooklookup[0].address, keyhooklookup[0].signature,
-                     keyhooklookup[0].demangled);
     keyhookfn = HyprlandAPI::createFunctionHook(PHANDLE, keyhooklookup[0].address, (void *)onKeyEvent);
     if (!keyhookfn->hook())
       throw std::runtime_error("Failed to hook CKeybindManager::onKeyEvent");

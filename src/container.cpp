@@ -1,4 +1,5 @@
 #include "container.hpp"
+#include "defines.hpp"
 #include "helpers.hpp"
 #include <hyprutils/math/Vector2D.hpp>
 #include <src/desktop/state/FocusState.hpp>
@@ -8,36 +9,63 @@
 #include <src/render/Renderer.hpp>
 
 WindowCard::WindowCard(PHLWINDOW window) : window(window) {
-  commit = window->wlSurface()->resource()->m_events.commit.listen([this] {
-    this->ready = false;
-    // this->lastCommit = NOW;
-    LOG(ERR, "In commit for: {}", this->window->m_title);
-  });
+  attachListeners(window->resource());
+  lastCommit = lastSnapshot = NOW;
 }
 
 WindowCard::~WindowCard() {
-  commit.reset();
+  commit.clear();
+}
+
+void WindowCard::attachListeners(SP<CWLSurfaceResource> surface) {
+  if (!surface)
+    return;
+
+  surface->breadthfirst([this](SP<CWLSurfaceResource> s, const Vector2D &offset, void *data) {
+    commit.push_back(s->m_events.commit.listen([this] {
+      const auto since = NOW - this->lastCommit;
+      if (FloatTime(since).count() > 0.0016) {
+        LOG(ERR, "In commit for: {}, since: {}", this->window->m_title, FloatTime(since).count());
+        this->ready = false;
+        this->lastCommit = NOW;
+      }
+    }));
+  },
+                        nullptr);
 }
 
 void WindowCard::requestFrame(PHLMONITOR monitor) {
-  const auto MONITOR = Desktop::focusState()->monitor();
-  const auto resource = window->wlSurface()->resource();
-  // resource->presentFeedback(NOW, MONITOR, false);
-  window->wlSurface()->resource()->frame(NOW);
-  auto FEEDBACK = makeUnique<CQueuedPresentationData>(window->wlSurface()->resource());
-  FEEDBACK->attachMonitor(MONITOR);
-  FEEDBACK->presented();
-  PROTO::presentation->queueData(std::move(FEEDBACK));
+  LOG(ERR, "{}: mapped: {}, ready: {}", window->m_title, window->resource()->m_mapped, ready);
+  if (!window->resource())
+    return;
+
+  window->resource()->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *data) {
+    s->frame(NOW);
+    s->presentFeedback(NOW, monitor, false);
+  },
+                                   nullptr);
 }
 
 void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.0f) {
   LOG_SCOPE();
+  if (!window)
+    return;
+  // whoops, almost went to infinity with low scales.
+  if (box.width <= 1.0f || box.height <= 1.0f)
+    return;
 
   contentBox = box;
   contentBox.round();
-  contentBox = contentBox.expand(-BORDERSIZE);
+  contentBox = contentBox.expand(-Config::borderSize);
+  if (scale != 1.0f) {
+    Vector2D center = box.pos() + box.size() / 2.0f;
+    contentBox.width *= scale;
+    contentBox.height *= scale;
+    contentBox.x = center.x - contentBox.width / 2.0f;
+    contentBox.y = center.y - contentBox.height / 2.0f;
+  }
   const auto padding = 4;
-  const auto barHeight = (FONTSIZE + padding) * scale;
+  const auto barHeight = (Config::fontSize + padding) * scale;
   titleBox = {contentBox.x, contentBox.y, contentBox.width, barHeight};
   previewBox = {contentBox.x, contentBox.y + barHeight, contentBox.width, contentBox.height - barHeight};
   /* Maybe..
@@ -69,6 +97,7 @@ void WindowCard::draw(const CBox &box, const float scale, const float alpha = 1.
 }
 
 bool WindowCard::snapshot(const Vector2D &targetSize) {
+  LOG_SCOPE(Log::ERR);
   if (!window || !window->wlSurface() || !window->wlSurface()->resource()) {
     LOG(ERR, "No window or surface");
     return false;
@@ -80,6 +109,12 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
 
   if (targetSize.x <= 1 || targetSize.y <= 1)
     return false;
+
+  const auto resource = window->wlSurface()->resource();
+  if (!resource->m_current.updated.all && !firstSnapshot)
+    return false;
+  if (firstSnapshot)
+    firstSnapshot = false;
 
   const auto MONITOR = Desktop::focusState()->monitor();
   auto surfaceSize = window->wlSurface()->getSurfaceBoxGlobal().value_or({0, 0, 0, 0}).size();
@@ -101,14 +136,12 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
   }
 
   g_pHyprOpenGL->clear(CHyprColor{0, 0, 0, 1.0f});
-  g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
 
   const double scale = std::min(fb.m_size.x / surfaceSize.x, fb.m_size.y / surfaceSize.y);
-  const auto resource = window->wlSurface()->resource();
+  g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
   resource->breadthfirst([&](SP<CWLSurfaceResource> s, const Vector2D &offset, void *) {
     if (!s->m_current.texture)
       return;
-
     auto box = s->extends();
     box.scale(scale).translate(offset * scale);
     g_pHyprOpenGL->renderTexture(s->m_current.texture, box, {.a = 1.0f});
@@ -117,7 +150,7 @@ bool WindowCard::snapshot(const Vector2D &targetSize) {
 
   g_pHyprRenderer->m_bBlockSurfaceFeedback = false;
   g_pHyprRenderer->endRender();
-  lastCommit = NOW;
+  lastSnapshot = NOW;
   ready = true;
   return true;
 }
@@ -128,9 +161,9 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 
   if (window->m_title != title) {
     title = window->m_title;
-    int maxChars = std::max(5.0f, (float)((baseWidth - padding) / (FONTSIZE * 0.55f)));
+    int maxChars = std::max(5.0f, (float)((baseWidth - padding) / (Config::fontSize * 0.55f)));
     std::string displayTitle = middleTruncate(title, maxChars);
-    titleTexture = g_pHyprOpenGL->renderText(displayTitle, CHyprColor(1.0, 1.0, 1.0, 1.0), FONTSIZE);
+    titleTexture = g_pHyprOpenGL->renderText(displayTitle, CHyprColor(1.0, 1.0, 1.0, 1.0), Config::fontSize);
   }
 
   g_pHyprOpenGL->renderRect(titleBox, CHyprColor(0.0, 0.0, 0.0, 0.8 * alpha), {});
@@ -144,5 +177,5 @@ void WindowCard::drawTitle(const CBox &box, const float scale, const float alpha
 }
 
 void WindowCard::drawBorder(const float alpha) {
-  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *ACTIVEBORDERCOLOR : *INACTIVEBORDERCOLOR, {.round = BORDERROUNDING, .roundingPower = BORDERROUNDINGPOWER, .borderSize = BORDERSIZE, .a = alpha});
+  g_pHyprOpenGL->renderBorder(contentBox, isActive ? *Config::activeBorderColor : *Config::inactiveBorderColor, {.round = (int)Config::borderRounding, .roundingPower = Config::borderRoundingPower, .borderSize = (int)Config::borderSize, .a = alpha});
 }

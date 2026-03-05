@@ -2,40 +2,59 @@
 #include "logger.hpp"
 #include <src/config/ConfigDataValues.hpp>
 #include <src/desktop/DesktopTypes.hpp>
-#include <src/event/EventBus.hpp>
 #include <src/helpers/Color.hpp>
 #include <src/plugins/PluginAPI.hpp>
 
+#ifdef HYPRLAND_LEGACY
+#include <src/plugins/HookSystem.hpp>
+#else
+#include <src/event/EventBus.hpp>
 #define HOOK_EVENT(PATH, LAMBDA) Event::bus()->m_events.PATH.listen(LAMBDA);
+#endif
 
 inline HANDLE PHANDLE = nullptr;
 
-inline bool DIMENABLED = true;
-inline bool BLURBG = true;
-inline bool POWERSAVE = true;
-inline bool INCLUDESPECIAL = true;
-inline bool BRINGTOACTIVE = true;
+enum class Direction : uint8_t {
+  UNKNOWN,
+  UP,
+  DOWN,
+  LEFT,
+  RIGHT
+};
 
-inline int FONTSIZE = 24;
-inline int BORDERSIZE = 1;
-inline int BORDERROUNDING = 0;
-inline float BORDERROUNDINGPOWER = 2;
+#define CONFIG_VARS                                                \
+  X(INT, fontSize, "font_size", 24)                                \
+  X(INT, borderSize, "border_size", 1)                             \
+  X(INT, borderRounding, "border_rounding", 0)                     \
+  X(FLOAT, borderRoundingPower, "border_rounding_power", 2.0f)     \
+  X(INT, dimEnabled, "dim", 1)                                     \
+  X(FLOAT, dimAmount, "dim_amount", 0.3f)                          \
+  X(INT, blurBG, "blur", 1)                                        \
+  X(FLOAT, unfocusedAlpha, "unfocused_alpha", 0.6f)                \
+  X(INT, powersave, "powersave", 1)                                \
+  X(FLOAT, rotationSpeed, "animation_speed", 1.0f)                 \
+  X(FLOAT, carouselSize, "carousel_size", 0.5f)                    \
+  X(FLOAT, windowSize, "window_size", 0.3f)                        \
+  X(FLOAT, windowSizeActive, "window_size_active", 1.2f)           \
+  X(FLOAT, windowSizeInactive, "window_size_inactive", 0.7f)       \
+  X(FLOAT, warp, "warp", 0.20f)                                    \
+  X(FLOAT, tilt, "tilt", 10.0f)                                    \
+  X(INT, bringToActive, "bring_to_active", 1)                      \
+  X(INT, splitMonitor, "split_monitor", 1)                         \
+  X(FLOAT, monitorSpacing, "monitor_spacing", 0.3f)                \
+  X(FLOAT, monitorAnimationSpeed, "monitor_animation_speed", 0.4f) \
+  X(INT, grace, "grace", 100)                                      \
+  X(INT, includeSpecial, "include_special", 1)                     \
+  X(STRING, style, "style", "carousel")
 
-inline CGradientValueData *ACTIVEBORDERCOLOR = nullptr;
-inline CGradientValueData *INACTIVEBORDERCOLOR = nullptr;
+namespace Config {
+#define X(type, name, conf, def) inline Hyprlang::type name;
+CONFIG_VARS
+#undef X
 
-inline float CAROUSELSIZE = 0.5f;
-inline float WINDOWSIZE = 0.3f;
-inline float WINDOWSIZEACTIVE = 1.2f;
-inline float WINDOWSIZEINACTIVE = 0.7f;
-inline float WARP = 0.20f;
-inline float TILT = 10.0f;
-inline float DIMAMOUNT = 0.3f;
-inline float UNFOCUSEDALPHA = 0.6f;
-inline float ROTATIONSPEED = 1.0f;
-inline bool SPLITMONITOR = true;
-inline float MONITORSPACING = 0.3f;
-inline float MONITORANIMATIONSPEED = 0.4f;
+inline CGradientValueData *activeBorderColor = nullptr;
+inline CGradientValueData *inactiveBorderColor = nullptr;
+} // namespace Config
 
 using Timestamp = std::chrono::steady_clock::time_point;
 using DeltaTime = std::chrono::duration<long long, std::nano>;

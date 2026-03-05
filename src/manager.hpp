@@ -1,5 +1,6 @@
 #pragma once
 #include "monitor.hpp"
+#include "styles.hpp"
 #include <map>
 #include <src/SharedDefs.hpp>
 #include <src/helpers/time/Timer.hpp>
@@ -11,19 +12,20 @@ class Manager {
 public:
   Manager();
   void activate();
+  void init();
   void deactivate();
   void toggle();
   void confirm();
+  void move(Direction dir);
   void update(float delta);
-  void up();
-  void down();
-  void next();
-  void prev();
   void rebuild();
   void draw(MONITORID monid, const CRegion &damage);
   void damageMonitors();
+  bool isActive() const;
 
+protected:
   bool active = false;
+  MONITORID activeMonitor = MONITOR_INVALID;
 
 private:
   void onConfigReload();
@@ -32,6 +34,19 @@ private:
   void onRender(eRenderStage stage);
   void onFocusChange(PHLMONITOR monitor);
 
+  bool setLayout();
+
+#ifdef HYPRLAND_LEGACY
+  struct {
+    SP<HOOK_CALLBACK_FN> config;
+    SP<HOOK_CALLBACK_FN> windowCreated;
+    SP<HOOK_CALLBACK_FN> windowDestroyed;
+    SP<HOOK_CALLBACK_FN> render;
+    SP<HOOK_CALLBACK_FN> focusChange;
+    SP<HOOK_CALLBACK_FN> monitorAdded;
+    SP<HOOK_CALLBACK_FN> monitorRemoved;
+  } listeners;
+#else
   struct {
     CHyprSignalListener config;
     CHyprSignalListener windowCreated;
@@ -41,14 +56,19 @@ private:
     CHyprSignalListener monitorAdded;
     CHyprSignalListener monitorRemoved;
   } listeners;
+#endif
 
   SP<CEventLoopTimer> loopTimer;
+  SP<CEventLoopTimer> graceTimer;
 
-  MONITORID activeMonitor = MONITOR_INVALID;
   Timestamp lastFrame;
   std::map<MONITORID, UP<Monitor>> monitors;
   AnimatedValue<float> monitorOffset;
+  AnimatedValue<float> monitorFade;
   Timestamp lastUpdate;
+  SP<IStyle> layoutStyle;
+
+  friend class Monitor;
 };
 
 inline UP<Manager> manager;

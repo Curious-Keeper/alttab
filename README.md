@@ -2,7 +2,8 @@
 
 Alt-tab style window carousel for Hyprland. Shows live previews of windows; cycle with Tab/arrows and pick with Enter/Release.
 
-![alttab](https://github.com/user-attachments/assets/5a3fc189-ea30-4719-a939-e2d485ea04eb)
+[![alttab]([https://github.com/user-attachments/assets/5a3fc189-ea30-4719-a939-e2d485ea04eb](https://github.com/user-attachments/assets/a8757771-ad23-46a1-92e5-59683994e223))
+](https://github.com/user-attachments/assets/a8757771-ad23-46a1-92e5-59683994e223)
 
 ## Requirements
 
@@ -46,6 +47,7 @@ In `hyprland.conf`, under `plugin { alttab { ... } }`:
 
 | Option                    | Type     | Default      | Description                                                                                        |
 | :------------------------ | :------- | :----------- | :------------------------------------------------------------------------------------------------- |
+| `style`               | string | `carousel`         | Style to use. carousel, grid, slide |
 | `font_size`               | int      | `24`         | Font size for window titles                                                                        |
 | `border_size`             | int      | `1`          | Border width                                                                                       |
 | `border_rounding`         | int      | `0`          | Corner rounding                                                                                    |
@@ -69,6 +71,7 @@ In `hyprland.conf`, under `plugin { alttab { ... } }`:
 | `monitor_animation_speed` | float    | `0.4`        | Monitor up/down animation speed, in seconds                                                        |
 | `include_special`         | bool     | `true`       | `1` = show special workspace windows; `0` = hide them                                              |
 | `bring_to_active`         | bool     | `false`      | Bring workspace with selected window to current monitor                                            |
+| `grace`         | int     | `100`      | Grace period before carousel shows (in ms)                                           |
 
 **Note:** _Hyprland.conf reloads on save by default._
 
@@ -104,6 +107,7 @@ plugin {
     warp = 0.20
     tilt = 10
     split_monitor = true
+    bring_to_active = true
   }
 }
 ```

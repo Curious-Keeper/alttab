@@ -1,15 +1,17 @@
 #pragma once
 #include "container.hpp"
 #include "defines.hpp"
+#include "styles.hpp"
 
 class Monitor {
 private:
-  struct CardData {
-    CBox box = {0, 0, 0, 0};
-    float z = 0.0f;
-    float alpha = 0.0f;
-    float scale = 1.0f;
+  struct RenderTask {
+    WindowCard *card;
+    RenderData data;
+    float visibility = 0.0f;
+    float since = 0.0f;
   };
+  std::vector<RenderTask> renderTasks;
 
 public:
   Monitor(PHLMONITOR monitor);
@@ -17,12 +19,11 @@ public:
   void renderTexture(const CRegion &damage);
   WP<WindowCard> addWindow(PHLWINDOW window);
   size_t removeWindow(PHLWINDOW window);
-  void next();
-  void prev();
-  void update(float delta, const bool active);
-  void draw(const CRegion &damage, const float &offset, const bool active);
-  CardData getCardBox(int index, const float &offset, const bool active);
-  PHLWINDOW select(int card);
+  bool animate(const float delta);
+  void update(const float delta);
+  void draw(const CRegion &damage, const float &offset, const float alpha);
+  void activeChanged();
+  bool isActive() const;
 
   bool animating = false;
   AnimatedValue<float> rotation;

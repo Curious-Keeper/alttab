@@ -7,6 +7,7 @@
 #include <hyprutils/signal/Listener.hpp>
 #include <src/config/ConfigDataValues.hpp>
 #include <src/helpers/time/Time.hpp>
+#include <src/protocols/core/Compositor.hpp>
 #define private public
 #include <src/render/Framebuffer.hpp>
 #undef private
@@ -21,14 +22,14 @@ public:
   void draw(const CBox &box, const float scale, const float alpha);
   void drawTitle(const CBox &box, const float scale, const float alpha);
   void drawBorder(const float alpha);
+  void attachListeners(SP<CWLSurfaceResource> surface);
 
   PHLWINDOW window;
   CFramebuffer fb;
   bool ready = false;
-  Timestamp lastCommit;
+  Timestamp lastCommit, lastSnapshot;
   float z = 0.0f;
   bool isActive = false;
-  bool needsSnapshot = true;
 
 private:
   CBox contentBox;
@@ -37,5 +38,6 @@ private:
   std::string title;
   SP<CTexture> titleTexture;
   double lastWidth = 0;
-  CHyprSignalListener commit;
+  std::vector<CHyprSignalListener> commit;
+  bool firstSnapshot = true;
 };
