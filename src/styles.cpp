@@ -62,17 +62,16 @@ RenderData Grid::calculate(const StyleContext &ctx, const Vector2D &surfaceSize)
   const int rows = (ctx.count + cols - 1) / cols;
   const int curRow = ctx.index / cols;
   const int curCol = ctx.index % cols;
+  const float gridWidth = ctx.mSize.x * Config::carouselSize;
+  const Vector2D slot{gridWidth / cols, ctx.mSize.y * Config::carouselSize};
   const float baseScale = std::min(ctx.mSize.x, ctx.mSize.y) * Config::windowSize;
   const float focusWeight = (ctx.index == ctx.activeIndex) ? 1.0f : 0.0f;
   const float scale = Config::windowSizeInactive * std::lerp(1.0f, Config::windowSizeActive, focusWeight * ctx.scale);
   const float aspect = (surfaceSize.y > 0) ? surfaceSize.x / surfaceSize.y : 1.77f;
   Vector2D size = {baseScale * aspect * scale, baseScale * scale};
+  const float gridStart = (ctx.mSize.x - gridWidth) / 2.0f;
 
-  const Vector2D cSize = {ctx.mSize.x / cols, ctx.mSize.y / rows};
-  const Vector2D cCenter = {
-      cSize.x * curCol + cSize.x / 2.0f,
-      cSize.y * curRow + cSize.y / 2.0f + ctx.offset.y};
-
+  const Vector2D cCenter = {gridStart + (slot.x * curCol) + (slot.x / 2), (slot.y * curRow) + (slot.y / 2) + ctx.offset.y};
   const Vector2D pos = cCenter - (size / 2.0f);
 
   const float finalAlpha = std::lerp(Config::unfocusedAlpha, 1.0f, focusWeight) * ctx.alpha;
